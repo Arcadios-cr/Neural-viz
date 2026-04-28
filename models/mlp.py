@@ -1,0 +1,69 @@
+import torch
+import torch.nn as nn
+
+
+ACTIVATIONS = {
+    "relu": nn.ReLU,
+    "tanh": nn.Tanh,
+    "sigmoid": nn.Sigmoid,
+}
+
+
+class MLP(nn.Module):
+    """
+    Réseau de neurones MLP (Multi-Layer Perceptron) configurable.
+
+    Paramètres
+    ----------
+    input_dim : int
+        Nombre de neurones d'entrée (2 pour R²)
+    hidden_layers : list[int]
+        Liste du nombre de neurones par couche cachée (ex: [8, 8])
+    output_dim : int
+        Nombre de neurones de sortie (1 pour R²→R)
+    activation : str
+        Fonction d'activation : "relu", "tanh" ou "sigmoid"
+    """
+
+    def __init__(
+        self,
+        input_dim: int = 2,
+        hidden_layers: list = [8],
+        output_dim: int = 1,
+        activation: str = "relu",
+    ):
+        super(MLP, self).__init__()
+
+        if activation not in ACTIVATIONS:
+            raise ValueError(f"Activation '{activation}' non supportée. Choisir parmi : {list(ACTIVATIONS.keys())}")
+
+        self.input_dim = input_dim
+        self.hidden_layers = hidden_layers
+        self.output_dim = output_dim
+        self.activation_name = activation
+
+        act_fn = ACTIVATIONS[activation]
+
+        # Construction des couches
+        layers = []
+        prev_dim = input_dim
+
+        for hidden_dim in hidden_layers:
+            layers.append(nn.Linear(prev_dim, hidden_dim))
+            layers.append(act_fn())
+            prev_dim = hidden_dim
+
+        layers.append(nn.Linear(prev_dim, output_dim))
+
+        self.network = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.network(x)
+
+    def __repr__(self):
+        return (
+            f"MLP(input={self.input_dim}, "
+            f"hidden={self.hidden_layers}, "
+            f"output={self.output_dim}, "
+            f"activation={self.activation_name})"
+        )
