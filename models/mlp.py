@@ -23,6 +23,9 @@ class MLP(nn.Module):
         Nombre de neurones de sortie (1 pour R²→R)
     activation : str
         Fonction d'activation : "relu", "tanh" ou "sigmoid"
+    use_batchnorm : bool
+        Si True, ajoute une couche de Batch Normalization après chaque couche linéaire cachée.
+        Ordre : Linear -> BatchNorm -> Activation
     """
 
     def __init__(
@@ -31,6 +34,7 @@ class MLP(nn.Module):
         hidden_layers: list = [8],
         output_dim: int = 1,
         activation: str = "relu",
+        use_batchnorm: bool = False,
     ):
         super(MLP, self).__init__()
 
@@ -41,6 +45,7 @@ class MLP(nn.Module):
         self.hidden_layers = hidden_layers
         self.output_dim = output_dim
         self.activation_name = activation
+        self.use_batchnorm = use_batchnorm
 
         act_fn = ACTIVATIONS[activation]
 
@@ -50,6 +55,8 @@ class MLP(nn.Module):
 
         for hidden_dim in hidden_layers:
             layers.append(nn.Linear(prev_dim, hidden_dim))
+            if use_batchnorm:
+                layers.append(nn.BatchNorm1d(hidden_dim))
             layers.append(act_fn())
             prev_dim = hidden_dim
 
@@ -61,9 +68,11 @@ class MLP(nn.Module):
         return self.network(x)
 
     def __repr__(self):
+        bn_tag = ", batchnorm=True" if self.use_batchnorm else ""
         return (
             f"MLP(input={self.input_dim}, "
             f"hidden={self.hidden_layers}, "
             f"output={self.output_dim}, "
-            f"activation={self.activation_name})"
+            f"activation={self.activation_name}"
+            f"{bn_tag})"
         )
