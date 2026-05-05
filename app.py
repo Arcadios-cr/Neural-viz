@@ -7,6 +7,7 @@ from matplotlib.colors import ListedColormap
 
 from models.mlp import MLP
 from data.datasets import make_gaussians, to_dataloader
+from training.trainer import Trainer
 
 
 # ─────────────────────────────────────────────
@@ -69,29 +70,6 @@ model = MLP(
 
 st.sidebar.markdown("---")
 st.sidebar.markdown(f"**Modèle :** `{model}`")
-
-
-# ─────────────────────────────────────────────
-# Boucle d'entraînement
-# ─────────────────────────────────────────────
-def train(model, loader, n_epochs, lr):
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    criterion = nn.BCEWithLogitsLoss()
-    losses = []
-
-    model.train()  # important pour BatchNorm (stats du batch en cours)
-    for epoch in range(n_epochs):
-        epoch_loss = 0.0
-        for X_batch, y_batch in loader:
-            optimizer.zero_grad()
-            preds = model(X_batch)
-            loss = criterion(preds, y_batch)
-            loss.backward()
-            optimizer.step()
-            epoch_loss += loss.item()
-        losses.append(epoch_loss / len(loader))
-
-    return losses
 
 
 # ─────────────────────────────────────────────
@@ -199,8 +177,12 @@ with col1:
 with col2:
     st.subheader("Frontière de décision")
     if st.button("Entraîner le réseau", type="primary"):
+        optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+        criterion = nn.BCEWithLogitsLoss()
+        trainer = Trainer(model=model, optimizer=optimizer, criterion=criterion)
+
         with st.spinner("Entraînement en cours..."):
-            losses = train(model, loader, n_epochs, learning_rate)
+            losses = trainer.train(loader, n_epochs=n_epochs)
         st.success(f"Entraînement terminé — loss finale : {losses[-1]:.4f}")
 
         mode = "logits" if viz_mode.startswith("Logits") else "probas"
