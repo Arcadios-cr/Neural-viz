@@ -3,7 +3,6 @@ import torch
 import torch.nn as nn
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.colors import ListedColormap
 
 from models.mlp import MLP
 from data.datasets import make_gaussians, to_dataloader
@@ -32,6 +31,12 @@ viz_mode = st.sidebar.radio(
     "Affichage de la sortie du réseau",
     ["Logits (sortie brute)", "Probabilités (sigmoid)"],
     index=0,
+)
+live_training = st.sidebar.checkbox("Entraînement en temps réel", value=True)
+boundary_refresh = st.sidebar.slider(
+    "Rafraîchir la frontière toutes les N époques",
+    1, 50, 10,
+    help="Plus petit = plus fluide mais plus lent. Plus grand = plus rapide.",
 )
 
 st.sidebar.header("Entraînement")
@@ -144,16 +149,6 @@ def plot_decision_boundary(model, X, y, mode: str = "logits"):
     return fig
 
 
-def plot_loss_curve(losses):
-    fig, ax = plt.subplots(figsize=(7, 3))
-    ax.plot(losses, color="#4CAF50", linewidth=2)
-    ax.set_xlabel("Époque")
-    ax.set_ylabel("Loss (BCE)")
-    ax.set_title("Courbe d'apprentissage")
-    ax.grid(True, alpha=0.3)
-    return fig
-
-
 # ─────────────────────────────────────────────
 # Bouton d'entraînement
 # ─────────────────────────────────────────────
@@ -176,23 +171,53 @@ with col1:
 
 with col2:
     st.subheader("Frontière de décision")
+
+    boundary_placeholder = st.empty()
+    status_placeholder = st.empty()
+
     if st.button("Entraîner le réseau", type="primary"):
         optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
         criterion = nn.BCEWithLogitsLoss()
         trainer = Trainer(model=model, optimizer=optimizer, criterion=criterion)
 
-        with st.spinner("Entraînement en cours..."):
-            losses = trainer.train(loader, n_epochs=n_epochs)
-        st.success(f"Entraînement terminé — loss finale : {losses[-1]:.4f}")
-
         mode = "logits" if viz_mode.startswith("Logits") else "probas"
+
+        # Conteneur pour la courbe de loss (sous les deux colonnes)
+        loss_placeholder = None  # initialisé plus bas si live_training
+
+        def update_callback(epoch: int, loss: float, current_model):
+            """Callback appelé à chaque fin d'époque pendant l'entraînement."""
+            status_placeholder.info(f"Époque {epoch + 1} / {n_epochs} — loss = {loss:.4f}")
+
+            # Frontière de décision : seulement toutes les N époques (lourd)
+            if (epoch + 1) % boundary_refresh == 0 or epoch == n_epochs - 1:
+                # Bascule en eval pour la viz (BatchNorm utilise les running stats)
+                current_model.eval()
+                fig = plot_decision_boundary(current_model, X, y, mode=mode)
+                boundary_placeholder.pyplot(fig)
+                plt.close(fig)
+                current_model.train()  # retour en mode train pour la suite
+
+            # Courbe de loss : à chaque époque (léger)
+            if loss_placeholder is not None:
+                loss_placeholder.line_chart(trainer.history["loss"])
+
+        # Mise en place de la zone "courbe d'apprentissage" en bas
+        st.subheader("Courbe d'apprentissage")
+        loss_placeholder = st.empty()
+
+        callback = update_callback if live_training else None
+        with st.spinner("Entraînement en cours..."):
+            losses = trainer.train(loader, n_epochs=n_epochs, on_epoch_end=callback)
+
+        # Rendu final (au cas où le live est désactivé ou si la dernière époque
+        # ne tombait pas sur un rafraîchissement)
+        model.eval()
         fig_boundary = plot_decision_boundary(model, X, y, mode=mode)
-        st.pyplot(fig_boundary)
+        boundary_placeholder.pyplot(fig_boundary)
         plt.close(fig_boundary)
 
-        st.subheader("Courbe d'apprentissage")
-        fig_loss = plot_loss_curve(losses)
-        st.pyplot(fig_loss)
-        plt.close(fig_loss)
+        loss_placeholder.line_chart(trainer.history["loss"])
+        status_placeholder.success(f"Entraînement terminé — loss finale : {losses[-1]:.4f}")
     else:
-        st.info("Configure les paramètres dans la sidebar, puis clique sur **Entraîner le réseau**.")
+        boundary_placeholder.info("Configure les paramètres dans la sidebar, puis clique sur **Entraîner le réseau**.")
