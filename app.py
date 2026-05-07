@@ -150,7 +150,20 @@ def plot_decision_boundary(model, X, y, mode: str = "logits"):
 
 
 # ─────────────────────────────────────────────
-# Bouton d'entraînement
+# Initialisation de st.session_state
+# ─────────────────────────────────────────────
+# st.session_state persiste entre les reruns de Streamlit (à chaque interaction
+# avec un widget, le script entier est ré-exécuté). On y stocke les artefacts
+# d'entraînement pour pouvoir les explorer après coup via le slider d'époque.
+if "trainer" not in st.session_state:
+    st.session_state.trainer = None
+    st.session_state.trained_X = None
+    st.session_state.trained_y = None
+    st.session_state.trained_mode = None
+
+
+# ─────────────────────────────────────────────
+# Layout principal
 # ─────────────────────────────────────────────
 col1, col2 = st.columns(2)
 
@@ -182,8 +195,9 @@ with col2:
 
         mode = "logits" if viz_mode.startswith("Logits") else "probas"
 
-        # Conteneur pour la courbe de loss (sous les deux colonnes)
-        loss_placeholder = None  # initialisé plus bas si live_training
+        # Mise en place de la zone "courbe d'apprentissage" en bas
+        st.subheader("Courbe d'apprentissage")
+        loss_placeholder = st.empty()
 
         def update_callback(epoch: int, loss: float, current_model):
             """Callback appelé à chaque fin d'époque pendant l'entraînement."""
@@ -199,12 +213,7 @@ with col2:
                 current_model.train()  # retour en mode train pour la suite
 
             # Courbe de loss : à chaque époque (léger)
-            if loss_placeholder is not None:
-                loss_placeholder.line_chart(trainer.history["loss"])
-
-        # Mise en place de la zone "courbe d'apprentissage" en bas
-        st.subheader("Courbe d'apprentissage")
-        loss_placeholder = st.empty()
+            loss_placeholder.line_chart(trainer.history["loss"])
 
         callback = update_callback if live_training else None
         with st.spinner("Entraînement en cours..."):
@@ -219,5 +228,71 @@ with col2:
 
         loss_placeholder.line_chart(trainer.history["loss"])
         status_placeholder.success(f"Entraînement terminé — loss finale : {losses[-1]:.4f}")
+
+        # Persistance pour le slider d'exploration de l'historique
+        st.session_state.trainer = trainer
+        st.session_state.trained_X = X
+        st.session_state.trained_y = y
+        st.session_state.trained_mode = mode
     else:
-        boundary_placeholder.info("Configure les paramètres dans la sidebar, puis clique sur **Entraîner le réseau**.")
+        # S'il n'y a pas eu d'entraînement encore, on affiche le message d'invite
+        if st.session_state.trainer is None:
+            boundary_placeholder.info(
+                "Configure les paramètres dans la sidebar, puis clique sur **Entraîner le réseau**."
+            )
+
+
+# ─────────────────────────────────────────────
+# Exploration de l'historique d'entraînement
+# ─────────────────────────────────────────────
+if st.session_state.trainer is not None:
+    trainer = st.session_state.trainer
+    n_snapshots = len(trainer.snapshots)
+
+    st.markdown("---")
+    st.subheader("Exploration de l'historique d'entraînement")
+    st.caption(
+        "Déplace le curseur pour visualiser l'état du réseau à n'importe quelle époque "
+        "passée. Les snapshots sont sauvegardés à chaque époque pendant l'entraînement."
+    )
+
+    selected_epoch = st.slider(
+        "Époque à visualiser",
+        min_value=1,
+        max_value=n_snapshots,
+        value=n_snapshots,
+        step=1,
+    )
+
+    # Restauration du snapshot demandé
+    trainer.load_snapshot(selected_epoch - 1)
+    trainer.model.eval()
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        fig_hist = plot_decision_boundary(
+            trainer.model,
+            st.session_state.trained_X,
+            st.session_state.trained_y,
+            mode=st.session_state.trained_mode,
+        )
+        # Mise à jour du titre pour refléter l'époque sélectionnée
+        fig_hist.axes[0].set_title(f"Frontière à l'époque {selected_epoch}")
+        st.pyplot(fig_hist)
+        plt.close(fig_hist)
+
+    with col_b:
+        st.metric(
+            label="Loss à cette époque",
+            value=f"{trainer.history['loss'][selected_epoch - 1]:.4f}",
+        )
+        st.metric(
+            label="Nombre total d'époques",
+            value=n_snapshots,
+        )
+        if st.button("Réinitialiser l'historique"):
+            st.session_state.trainer = None
+            st.session_state.trained_X = None
+            st.session_state.trained_y = None
+            st.session_state.trained_mode = None
+            st.rerun()
