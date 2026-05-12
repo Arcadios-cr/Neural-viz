@@ -5,7 +5,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from models.mlp import MLP
-from data.datasets import make_gaussians, to_dataloader
+from data.datasets import DATASETS, get_dataset, to_dataloader
 from training.trainer import Trainer
 
 
@@ -49,15 +49,26 @@ learning_rate = st.sidebar.select_slider(
 batch_size = st.sidebar.slider("Batch size", 8, 64, 32)
 
 st.sidebar.header("Dataset")
+dataset_name = st.sidebar.selectbox(
+    "Type de dataset",
+    list(DATASETS.keys()),
+    index=0,
+    help=(
+        "⭐ Two Gaussians — trivial (linéairement séparable)\n"
+        "⭐⭐ Moons / Circles / XOR — non linéairement séparables, simples\n"
+        "⭐⭐⭐ Sinusoidal / Islands — frontières complexes\n"
+        "⭐⭐⭐⭐ Spirals — le boss final"
+    ),
+)
 n_samples = st.sidebar.slider("Nombre de points", 100, 500, 200)
-std = st.sidebar.slider("Écart-type des gaussiennes", 0.1, 1.5, 0.5)
+noise = st.sidebar.slider("Niveau de bruit", 0.0, 1.0, 0.2, step=0.05)
 seed = st.sidebar.number_input("Seed", value=42, step=1)
 
 
 # ─────────────────────────────────────────────
 # Génération du dataset
 # ─────────────────────────────────────────────
-X, y = make_gaussians(n_samples=n_samples, std=std, seed=int(seed))
+X, y = get_dataset(dataset_name, n_samples=n_samples, noise=noise, seed=int(seed))
 loader = to_dataloader(X, y, batch_size=batch_size)
 
 
@@ -177,7 +188,7 @@ with col1:
                         edgecolors="white", linewidths=0.5, s=40, label=f"Classe {cls}")
     ax_data.set_xlabel("x₁")
     ax_data.set_ylabel("x₂")
-    ax_data.set_title("Dataset — deux gaussiennes")
+    ax_data.set_title(f"Dataset — {dataset_name}")
     ax_data.legend()
     st.pyplot(fig_data)
     plt.close(fig_data)
