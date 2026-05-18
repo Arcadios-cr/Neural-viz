@@ -115,26 +115,77 @@ def make_islands(
     seed: int = 42,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
-    Plusieurs petits îlots gaussiens mélangés entre les deux classes.
-    6 îlots placés de façon non séparable linéairement :
-    classe 0 et classe 1 alternent en damier irrégulier.
+    Quatre îles (classe 0) entourées par leur océan respectif (classe 1).
 
+    Géométrie inspirée d'une vraie île tropicale :
+        - 4 coins du plan : (-1.5, 1.5), (1.5, 1.5), (-1.5, -1.5), (1.5, -1.5)
+        - Pour chaque coin :
+            • ÎLE (classe 0, bleue) = disque dense au centre du coin
+              (gaussienne resserrée + rejet des points hors d'un rayon r_island_max)
+            • PLAGE (zone vide) = anneau intermédiaire sans aucun point
+              entre l'île et l'océan, pour garantir une séparation visuelle nette
+            • OCÉAN (classe 1, rouge) = couronne autour de l'île
+              (anneau de r_water_in à r_water_out, densité uniforme)
+
+    Aucun mélange entre les classes grâce au rejet strict des points
+    qui sortiraient de leur zone.
+
+    Pour bien classifier, le réseau doit apprendre à isoler 4 disques fermés
+    (les îles) à l'intérieur d'un fond de la classe opposée. Demande
+    de la profondeur (≥ 2 couches cachées) pour fonctionner correctement.
     """
     rng = np.random.default_rng(seed)
-    centers = [
-        ((-1.5, -1.5), 0),
-        (( 0.0, -1.0), 1),
-        (( 1.5, -1.5), 0),
-        ((-1.0,  1.0), 1),
-        (( 1.0,  1.0), 0),
-        (( 0.0,  1.5), 1),
-    ]
-    n_per_island = n_samples // len(centers)
+
+    corners = [(-1.5, 1.5), (1.5, 1.5), (-1.5, -1.5), (1.5, -1.5)]
+
+    # Répartition : 35% pour les îles (compactes), 65% pour les océans (étalés)
+    n_per_corner = n_samples // 4
+    n_island = int(n_per_corner * 0.35)
+    n_water = n_per_corner - n_island
+
+    # ─── Paramètres géométriques (le bruit module légèrement, sans casser la structure) ───
+    # ÎLE : disque dense
+    island_std = 0.12 + 0.03 * noise       # écart-type de la gaussienne
+    r_island_max = 0.35                    # rayon de rejet strict de l'île
+
+    # PLAGE : zone vide entre 0.35 et 0.60 (0.25 d'espace minimum, garanti)
+    # OCÉAN : anneau
+    r_water_in = 0.60                      # début de l'océan (au-delà de la plage)
+    r_water_out = 1.35                     # fin de l'océan
+    water_jitter = 0.03 + 0.02 * noise     # très léger bruit pour pas casser l'anneau
 
     parts_X, parts_y = [], []
-    for (cx, cy), label in centers:
-        parts_X.append(rng.normal(loc=[cx, cy], scale=noise, size=(n_per_island, 2)))
-        parts_y.append(np.full(n_per_island, label))
+    for (cx, cy) in corners:
+        # ─── ÎLE (classe 0) ───────────────────────────────────────
+        # On sur-échantillonne puis on rejette les points hors du rayon max
+        # pour garantir un disque bien fermé, sans débordement vers la mer.
+        oversample = max(n_island * 3, 30)
+        candidates = rng.normal(loc=[cx, cy], scale=island_std, size=(oversample, 2))
+        distances = np.linalg.norm(candidates - np.array([cx, cy]), axis=1)
+        valid = candidates[distances < r_island_max]
+        # On garde les n_island premiers points valides (toujours assez grâce à l'oversample)
+        island = valid[:n_island]
+        parts_X.append(island)
+        parts_y.append(np.zeros(len(island), dtype=int))
+
+        # ─── OCÉAN (classe 1) ──────────────────────────────────────
+        # Anneau à densité uniforme : on tire r² uniformément puis racine carrée.
+        r2 = rng.uniform(r_water_in ** 2, r_water_out ** 2, size=n_water)
+        r = np.sqrt(r2)
+        theta = rng.uniform(0.0, 2 * np.pi, size=n_water)
+        water = np.stack(
+            [cx + r * np.cos(theta), cy + r * np.sin(theta)],
+            axis=1,
+        )
+        # Très léger bruit gaussien pour naturaliser, MAIS on rejette tout point
+        # qui retomberait dans la plage (distance < r_water_in - marge)
+        water = water + rng.normal(scale=water_jitter, size=water.shape)
+        distances_water = np.linalg.norm(water - np.array([cx, cy]), axis=1)
+        keep = distances_water >= (r_water_in - 0.02)   # marge de sécurité
+        water = water[keep]
+
+        parts_X.append(water)
+        parts_y.append(np.ones(len(water), dtype=int))
 
     X = np.vstack(parts_X)
     y = np.concatenate(parts_y)
@@ -227,3 +278,64 @@ def to_dataloader(
 
     dataset = TensorDataset(X_tensor, y_tensor)
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
+
+
+# ─────────────────────────────────────────────
+# Split train / validation / test
+# ─────────────────────────────────────────────
+def split_dataset(
+    X: np.ndarray,
+    y: np.ndarray,
+    train_ratio: float = 0.6,
+    val_ratio: float = 0.2,
+    seed: int = 42,
+) -> tuple[
+    tuple[np.ndarray, np.ndarray],
+    tuple[np.ndarray, np.ndarray],
+    tuple[np.ndarray, np.ndarray],
+]:
+    """
+    Découpe (X, y) en trois sous-ensembles disjoints : train, validation, test.
+
+    Les ratios doivent sommer à <= 1. Le test reçoit le reste : `1 - train_ratio - val_ratio`.
+
+    Paramètres
+    ----------
+    X : np.ndarray (n, 2)
+    y : np.ndarray (n,)
+    train_ratio : float
+        Fraction du dataset allouée à l'entraînement (par défaut 0.6).
+    val_ratio : float
+        Fraction allouée à la validation (par défaut 0.2).
+        Le test reçoit `1 - train_ratio - val_ratio`.
+    seed : int
+        Graine pour la reproductibilité du split.
+
+    Retourne
+    --------
+    ((X_train, y_train), (X_val, y_val), (X_test, y_test))
+    """
+    if not 0.0 < train_ratio < 1.0:
+        raise ValueError("train_ratio doit être dans ]0, 1[.")
+    if not 0.0 <= val_ratio < 1.0:
+        raise ValueError("val_ratio doit être dans [0, 1[.")
+    if train_ratio + val_ratio >= 1.0:
+        raise ValueError("train_ratio + val_ratio doit être strictement inférieur à 1 (sinon pas de test).")
+
+    rng = np.random.default_rng(seed)
+    n = len(y)
+    indices = rng.permutation(n)
+
+    n_train = int(n * train_ratio)
+    n_val = int(n * val_ratio)
+    # n_test reçoit le reste pour éviter les arrondis perdus
+
+    train_idx = indices[:n_train]
+    val_idx = indices[n_train:n_train + n_val]
+    test_idx = indices[n_train + n_val:]
+
+    return (
+        (X[train_idx], y[train_idx]),
+        (X[val_idx],   y[val_idx]),
+        (X[test_idx],  y[test_idx]),
+    )
