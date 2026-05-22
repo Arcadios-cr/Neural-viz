@@ -65,9 +65,17 @@ class ActivationCapture:
         return hook
 
     def _register_hooks(self) -> None:
-        """Parcourt le réseau et attache un hook à chaque module d'activation."""
+        """
+        Parcourt le réseau (récursivement via `named_modules()`) et attache
+        un hook à chaque module d'activation rencontré.
+
+        Compatible avec les architectures variées :
+        - MLP (un seul `nn.Sequential` nommé `network`)
+        - MLPBottleneck (trois blocs : `encoder`, `bottleneck`, `decoder`)
+        - Toute autre architecture combinant des couches d'activation.
+        """
         layer_idx = 0
-        for module in self.model.network:
+        for module in self.model.modules():
             if isinstance(module, ACTIVATION_TYPES):
                 name = f"layer_{layer_idx}"
                 handle = module.register_forward_hook(self._make_hook(name))
