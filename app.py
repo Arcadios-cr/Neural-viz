@@ -359,6 +359,173 @@ def plot_activations_grid(
     return figures
 
 
+def plot_weight_heatmaps(model: nn.Module, max_cols: int = 6):
+    """
+    Pour chaque couche Linear du modèle, affiche une heatmap de la matrice
+    de poids (et un mini-graphique des biais à côté).
+
+    Lecture :
+        - Chaque ligne de la heatmap  = un neurone de SORTIE de la couche
+        - Chaque colonne              = un neurone d'ENTRÉE (ou feature d'entrée)
+        - Couleur :  rouge intense = poids positif fort
+                     bleu intense  = poids négatif fort
+                     blanc         = poids proche de zéro (connexion faible)
+        - Échelle symétrique autour de 0 pour bien voir les signes.
+
+    Retourne
+    --------
+    list[tuple[str, matplotlib.figure.Figure]]
+        Une liste de (nom_de_couche, figure) — une figure par couche Linear.
+    """
+    figures = []
+    linear_idx = 0
+
+    for module in model.modules():
+        if not isinstance(module, nn.Linear):
+            continue
+
+        W = module.weight.detach().cpu().numpy()        # shape (out, in)
+        b = module.bias.detach().cpu().numpy() if module.bias is not None else None
+        n_out, n_in = W.shape
+
+        # Échelle symétrique autour de 0 pour bien visualiser les signes
+        amax = max(abs(W.min()), abs(W.max()), 1e-8)
+
+        # Figure avec 2 sous-graphes : la matrice de poids + les biais en colonne
+        fig, (ax_w, ax_b) = plt.subplots(
+            1, 2,
+            figsize=(max(5, 0.4 * n_in + 3), max(3, 0.4 * n_out + 1.5)),
+            gridspec_kw={"width_ratios": [n_in, 1]},
+        )
+
+        # ─── Matrice de poids ───
+        im = ax_w.imshow(W, cmap="RdBu_r", vmin=-amax, vmax=amax, aspect="auto")
+        ax_w.set_xlabel(f"Neurone d'entrée (0 → {n_in - 1})")
+        ax_w.set_ylabel(f"Neurone de sortie (0 → {n_out - 1})")
+        ax_w.set_xticks(range(n_in))
+        ax_w.set_yticks(range(n_out))
+
+        # Annoter chaque case si la matrice n'est pas trop grande
+        if n_in * n_out <= 256:
+            for i in range(n_out):
+                for j in range(n_in):
+                    val = W[i, j]
+                    color = "white" if abs(val) > 0.6 * amax else "black"
+                    ax_w.text(j, i, f"{val:.2f}", ha="center", va="center",
+                              color=color, fontsize=7)
+
+        plt.colorbar(im, ax=ax_w, label="valeur du poids", fraction=0.03, pad=0.02)
+
+        # ─── Biais (colonne) ───
+        if b is not None:
+            b_max = max(abs(b.min()), abs(b.max()), 1e-8)
+            ax_b.imshow(b.reshape(-1, 1), cmap="RdBu_r",
+                        vmin=-b_max, vmax=b_max, aspect="auto")
+            ax_b.set_title("biais", fontsize=9)
+            ax_b.set_xticks([])
+            ax_b.set_yticks(range(n_out))
+            for i in range(n_out):
+                color = "white" if abs(b[i]) > 0.6 * b_max else "black"
+                ax_b.text(0, i, f"{b[i]:.2f}", ha="center", va="center",
+                          color=color, fontsize=7)
+        else:
+            ax_b.axis("off")
+
+        fig.suptitle(
+            f"Couche Linear #{linear_idx}  —  poids ({n_out} × {n_in}) + biais",
+            fontsize=11,
+        )
+        fig.tight_layout()
+        figures.append((f"linear_{linear_idx}", fig))
+        linear_idx += 1
+
+    return figures
+
+
+def plot_first_layer_lines(model: nn.Module, X: np.ndarray, y: np.ndarray):
+    """
+    Visualise les "droites de séparation" apprises par chaque neurone de la
+    première couche Linear, superposées au scatter plot des données.
+
+    Pour la première couche, chaque neurone calcule :
+        z = w₁ · x₁ + w₂ · x₂ + b
+    puis applique l'activation. La frontière où z = 0 est l'équation d'une
+    droite dans le plan d'entrée. Cette fonction trace cette droite pour
+    chaque neurone, ce qui révèle géométriquement ce que CHAQUE neurone
+    de la première couche "regarde".
+
+    Renvoie None si le modèle n'a pas de première couche Linear avec
+    input_dim = 2 (pas applicable).
+    """
+    # Trouver la première couche Linear
+    first_linear = None
+    for module in model.modules():
+        if isinstance(module, nn.Linear):
+            first_linear = module
+            break
+
+    if first_linear is None or first_linear.in_features != 2:
+        return None
+
+    W = first_linear.weight.detach().cpu().numpy()       # (n_out, 2)
+    b = first_linear.bias.detach().cpu().numpy() if first_linear.bias is not None \
+        else np.zeros(W.shape[0])
+    n_neurons = W.shape[0]
+
+    fig, ax = plt.subplots(figsize=(7, 6))
+
+    # ─── Scatter des données en arrière-plan ───
+    colors_pts = ["#2196F3", "#F44336"]
+    for cls in [0, 1]:
+        m = y == cls
+        ax.scatter(X[m, 0], X[m, 1], c=colors_pts[cls],
+                   edgecolors="white", linewidths=0.4, s=30,
+                   alpha=0.5, label=f"Classe {cls}", zorder=1)
+
+    # ─── Une droite par neurone : w₁x + w₂y + b = 0 ───
+    x_min, x_max = X[:, 0].min() - 0.5, X[:, 0].max() + 0.5
+    y_min, y_max = X[:, 1].min() - 0.5, X[:, 1].max() + 0.5
+    x_range = np.linspace(x_min, x_max, 100)
+
+    # Palette de couleurs distinctes pour les droites
+    cmap = plt.cm.tab20 if n_neurons > 10 else plt.cm.tab10
+    line_colors = cmap(np.linspace(0, 1, n_neurons))
+
+    for i, (w, bi) in enumerate(zip(W, b)):
+        w1, w2 = w
+        # w₁ x + w₂ y + b = 0  →  y = -(w₁ x + b) / w₂
+        if abs(w2) > 1e-6:
+            y_line = -(w1 * x_range + bi) / w2
+            # On ne dessine que la portion qui passe dans la zone visible
+            mask = (y_line >= y_min) & (y_line <= y_max)
+            if mask.any():
+                ax.plot(x_range[mask], y_line[mask],
+                        color=line_colors[i], linewidth=1.5,
+                        alpha=0.85, label=f"neurone {i}", zorder=2)
+        else:
+            # Ligne quasi-verticale : w₁ x + b = 0  →  x = -b / w₁
+            if abs(w1) > 1e-6:
+                x_vert = -bi / w1
+                if x_min <= x_vert <= x_max:
+                    ax.axvline(x_vert, color=line_colors[i], linewidth=1.5,
+                               alpha=0.85, label=f"neurone {i}", zorder=2)
+
+    ax.set_xlim(x_min, x_max)
+    ax.set_ylim(y_min, y_max)
+    ax.set_xlabel("x₁")
+    ax.set_ylabel("x₂")
+    ax.set_title(
+        f"Droites apprises par la 1ère couche ({n_neurons} neurones)\n"
+        "Chaque droite = la frontière où un neurone passe de inactif à actif"
+    )
+    # Légende compacte si beaucoup de neurones
+    if n_neurons <= 8:
+        ax.legend(fontsize=8, loc="best")
+    else:
+        ax.legend(fontsize=6, loc="best", ncol=2)
+    return fig
+
+
 # ─────────────────────────────────────────────
 # Initialisation de st.session_state
 # ─────────────────────────────────────────────
@@ -585,6 +752,60 @@ if st.session_state.trainer is not None:
             )
 
         for layer_name, fig in layer_figures:
+            st.pyplot(fig)
+            plt.close(fig)
+
+
+# ─────────────────────────────────────────────
+# Visualisation des poids (heatmaps des matrices Linear)
+# ─────────────────────────────────────────────
+if st.session_state.trainer is not None:
+    st.markdown("---")
+    st.subheader("Poids appris par chaque couche")
+    st.caption(
+        "Les heatmaps ci-dessous montrent les **valeurs des poids** appris par "
+        "chaque couche linéaire du réseau. **Rouge** = poids positif fort, "
+        "**bleu** = poids négatif fort, **blanc** = connexion faible ou nulle. "
+        "Pour la première couche, on affiche aussi les **droites de séparation** "
+        "apprises par chaque neurone, superposées aux données — c'est la vision "
+        "géométrique directe de ce que chaque neurone 'regarde'."
+    )
+
+    show_weights = st.checkbox(
+        "Afficher les poids appris",
+        value=False,
+        help=(
+            "Calcule et affiche les heatmaps des matrices de poids de toutes "
+            "les couches Linear du réseau, plus la visualisation des droites "
+            "de la première couche."
+        ),
+    )
+
+    if show_weights:
+        bm = st.session_state.trainer.model
+        bX = st.session_state.trained_X
+        by = st.session_state.trained_y
+
+        # ─── Droites de la première couche (vue géométrique) ───
+        fig_lines = plot_first_layer_lines(bm, bX, by)
+        if fig_lines is not None:
+            st.markdown(
+                "**Vue géométrique : droites apprises par la 1ère couche**"
+            )
+            st.caption(
+                "Chaque droite correspond à un neurone : il s'active fortement "
+                "d'un côté et est inactif (ReLU = 0) de l'autre. Les angles et "
+                "positions des droites montrent où chaque neurone a appris à "
+                "découper le plan."
+            )
+            st.pyplot(fig_lines)
+            plt.close(fig_lines)
+
+        # ─── Heatmaps des matrices de poids de toutes les couches ───
+        st.markdown("**Heatmaps des matrices de poids (toutes les couches)**")
+        with st.spinner("Calcul des heatmaps de poids..."):
+            weight_figures = plot_weight_heatmaps(bm)
+        for layer_name, fig in weight_figures:
             st.pyplot(fig)
             plt.close(fig)
 
