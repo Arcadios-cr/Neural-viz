@@ -28,15 +28,58 @@ n_hidden_layers = st.sidebar.slider("Nombre de couches cachées", 1, 4, 1)
 neurons_per_layer = st.sidebar.slider("Neurones par couche cachée", 2, 64, 8)
 activation = st.sidebar.selectbox("Fonction d'activation", ["relu", "tanh", "sigmoid"])
 use_batchnorm = st.sidebar.checkbox("Utiliser BatchNorm", value=False)
+dropout_rate = st.sidebar.slider(
+    "Dropout (régularisation)",
+    0.0, 0.7, 0.0, step=0.05,
+    help=(
+        "Probabilité d'éteindre aléatoirement chaque neurone à chaque pas "
+        "d'entraînement. Réduit l'overfitting. 0 = désactivé. "
+        "Valeurs typiques : 0.1 à 0.3."
+    ),
+)
 use_bottleneck = st.sidebar.checkbox(
-    "Espace latent (bottleneck 2D)",
+    "Espace latent (bottleneck)",
     value=False,
     help=(
-        "Insère un goulot d'étranglement à 2 neurones au milieu du réseau. "
-        "Permet de visualiser comment le réseau 'redessine' les données. "
-        "Encoder et décodeur partagent l'architecture configurée ci-dessus "
-        "(symétrique)."
+        "Insère un goulot d'étranglement au milieu du réseau. "
+        "Permet de visualiser comment le réseau 'redessine' les données."
     ),
+)
+bottleneck_dim = st.sidebar.radio(
+    "Dimension de l'espace latent",
+    [2, 3],
+    index=0,
+    horizontal=True,
+    help=(
+        "2D : scatter plot statique (matplotlib).\n"
+        "3D : scatter plot interactif rotatif (Plotly) — permet de tourner "
+        "autour de l'espace latent à la souris pour voir tous les angles."
+    ),
+    disabled=not use_bottleneck,
+)
+funnel_encoder = st.sidebar.checkbox(
+    "Encoder en entonnoir",
+    value=False,
+    help=(
+        "Au lieu d'avoir toutes les couches encoder de la même taille, "
+        "les tailles décroissent : [n, n/2, n/4, ...]."
+    ),
+    disabled=not use_bottleneck,
+)
+head_layers = st.sidebar.slider(
+    "Tête (décodeur) — nombre de couches",
+    1, 4, 2,
+    help=(
+        "Nombre de couches cachées après le bottleneck. Par défaut la tête "
+        "est plus petite que l'encoder, comme un vrai décodeur."
+    ),
+    disabled=not use_bottleneck,
+)
+head_neurons = st.sidebar.slider(
+    "Tête — neurones par couche",
+    2, 64, 16,
+    help="Nombre de neurones dans chaque couche du décodeur.",
+    disabled=not use_bottleneck,
 )
 
 st.sidebar.header("Visualisation")
@@ -117,25 +160,40 @@ test_loader  = to_dataloader(X_test,  y_test,  batch_size=batch_size, shuffle=Fa
 # ─────────────────────────────────────────────
 # Construction du modèle
 # ─────────────────────────────────────────────
-hidden_layers = [neurons_per_layer] * n_hidden_layers
 if use_bottleneck:
-    # Architecture symétrique encoder/decoder, bottleneck 2D au milieu
+    # ─── Encoder : symétrique OU en entonnoir ───
+    if funnel_encoder:
+        # Sizes décroissantes : [n, max(n/2, 4), max(n/4, 4), ...]
+        encoder_layers = []
+        size = neurons_per_layer
+        for _ in range(n_hidden_layers):
+            encoder_layers.append(max(size, 4))   # min 4 neurones pour garder du sens
+            size = size // 2
+    else:
+        encoder_layers = [neurons_per_layer] * n_hidden_layers
+
+    # ─── Décodeur (la "tête") : indépendamment configuré ───
+    decoder_layers = [head_neurons] * head_layers
+
     model = MLPBottleneck(
         input_dim=2,
-        encoder_layers=hidden_layers,
-        bottleneck_dim=2,
-        decoder_layers=hidden_layers,
+        encoder_layers=encoder_layers,
+        bottleneck_dim=bottleneck_dim,
+        decoder_layers=decoder_layers,
         output_dim=1,
         activation=activation,
         use_batchnorm=use_batchnorm,
+        dropout_rate=dropout_rate,
     )
 else:
+    hidden_layers = [neurons_per_layer] * n_hidden_layers
     model = MLP(
         input_dim=2,
         hidden_layers=hidden_layers,
         output_dim=1,
         activation=activation,
         use_batchnorm=use_batchnorm,
+        dropout_rate=dropout_rate,
     )
 
 st.sidebar.markdown("---")
@@ -249,6 +307,54 @@ def plot_latent_space(model: MLPBottleneck, X: np.ndarray, y: np.ndarray):
     ax.set_title("Espace latent — représentation 2D apprise par l'encoder")
     ax.legend()
     ax.set_aspect("equal", adjustable="datalim")
+    return fig
+
+
+def plot_latent_space_3d(model: MLPBottleneck, X: np.ndarray, y: np.ndarray):
+    """
+    Comme plot_latent_space() mais pour un bottleneck à 3 dimensions.
+
+    Renvoie une figure Plotly 3D interactive. L'utilisateur peut tourner autour de l'espace latent pour
+    découvrir les angles où les classes apparaissent comme séparées.
+
+    """
+    import plotly.graph_objects as go
+
+    model.eval()
+    with torch.no_grad():
+        Z = model.encode(torch.tensor(X, dtype=torch.float32)).numpy()
+    # Z a shape (n, 3)
+
+    colors_pts = ["#2196F3", "#F44336"]
+    fig = go.Figure()
+    for cls in [0, 1]:
+        mask = y == cls
+        fig.add_trace(go.Scatter3d(
+            x=Z[mask, 0],
+            y=Z[mask, 1],
+            z=Z[mask, 2],
+            mode="markers",
+            name=f"Classe {cls}",
+            marker=dict(
+                size=4,
+                color=colors_pts[cls],
+                line=dict(color="white", width=0.5),
+                opacity=0.85,
+            ),
+        ))
+
+    fig.update_layout(
+        scene=dict(
+            xaxis_title="z₁",
+            yaxis_title="z₂",
+            zaxis_title="z₃",
+            aspectmode="data",
+        ),
+        title="Espace latent 3D",
+        margin=dict(l=0, r=0, t=40, b=0),
+        height=550,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
     return fig
 
 
@@ -688,6 +794,9 @@ if (
     bX = st.session_state.trained_X
     by = st.session_state.trained_y
 
+    # Dimension réelle du bottleneck du modèle entraîné
+    latent_dim = bm.bottleneck_dim
+
     col_in, col_lat = st.columns(2)
     with col_in:
         st.markdown("**Espace d'entrée** (donné au réseau)")
@@ -707,10 +816,22 @@ if (
         plt.close(fig_in)
 
     with col_lat:
-        st.markdown("**Espace latent** (sortie du bottleneck 2D)")
-        fig_lat = plot_latent_space(bm, bX, by)
-        st.pyplot(fig_lat)
-        plt.close(fig_lat)
+        if latent_dim == 2:
+            st.markdown("**Espace latent** (sortie du bottleneck 2D)")
+            fig_lat = plot_latent_space(bm, bX, by)
+            st.pyplot(fig_lat)
+            plt.close(fig_lat)
+        elif latent_dim == 3:
+            st.markdown(
+                "**Espace latent 3D** (sortie du bottleneck — rotative à la souris)"
+            )
+            fig_lat3d = plot_latent_space_3d(bm, bX, by)
+            st.plotly_chart(fig_lat3d, use_container_width=True)
+        else:
+            st.warning(
+                f"Bottleneck en dimension {latent_dim} non visualisable directement "
+                "(seulement 2D et 3D supportés)."
+            )
 
 
 # ─────────────────────────────────────────────

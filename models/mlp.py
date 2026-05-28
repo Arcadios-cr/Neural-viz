@@ -35,21 +35,27 @@ class MLP(nn.Module):
         output_dim: int = 1,
         activation: str = "relu",
         use_batchnorm: bool = False,
+        dropout_rate: float = 0.0,
     ):
         super(MLP, self).__init__()
 
         if activation not in ACTIVATIONS:
             raise ValueError(f"Activation '{activation}' non supportée. Choisir parmi : {list(ACTIVATIONS.keys())}")
+        if not 0.0 <= dropout_rate < 1.0:
+            raise ValueError(f"dropout_rate doit être dans [0, 1[, reçu {dropout_rate}.")
 
         self.input_dim = input_dim
         self.hidden_layers = hidden_layers
         self.output_dim = output_dim
         self.activation_name = activation
         self.use_batchnorm = use_batchnorm
+        self.dropout_rate = dropout_rate
 
         act_fn = ACTIVATIONS[activation]
 
         # Construction des couches
+        # Ordre : Linear -> [BatchNorm] -> Activation -> [Dropout]
+        # Le dropout est placé APRES l'activation (convention la plus courante).
         layers = []
         prev_dim = input_dim
 
@@ -58,6 +64,8 @@ class MLP(nn.Module):
             if use_batchnorm:
                 layers.append(nn.BatchNorm1d(hidden_dim))
             layers.append(act_fn())
+            if dropout_rate > 0.0:
+                layers.append(nn.Dropout(dropout_rate))
             prev_dim = hidden_dim
 
         layers.append(nn.Linear(prev_dim, output_dim))
@@ -69,10 +77,11 @@ class MLP(nn.Module):
 
     def __repr__(self):
         bn_tag = ", batchnorm=True" if self.use_batchnorm else ""
+        dropout_tag = f", dropout={self.dropout_rate:.2f}" if self.dropout_rate > 0 else ""
         return (
             f"MLP(input={self.input_dim}, "
             f"hidden={self.hidden_layers}, "
             f"output={self.output_dim}, "
             f"activation={self.activation_name}"
-            f"{bn_tag})"
+            f"{bn_tag}{dropout_tag})"
         )

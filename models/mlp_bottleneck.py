@@ -64,6 +64,7 @@ class MLPBottleneck(nn.Module):
         output_dim: int = 1,
         activation: str = "relu",
         use_batchnorm: bool = False,
+        dropout_rate: float = 0.0,
     ):
         super().__init__()
 
@@ -72,6 +73,8 @@ class MLPBottleneck(nn.Module):
                 f"Activation '{activation}' non supportée. "
                 f"Choisir parmi : {list(ACTIVATIONS.keys())}"
             )
+        if not 0.0 <= dropout_rate < 1.0:
+            raise ValueError(f"dropout_rate doit être dans [0, 1[, reçu {dropout_rate}.")
 
         self.input_dim = input_dim
         self.encoder_layers = encoder_layers
@@ -80,10 +83,11 @@ class MLPBottleneck(nn.Module):
         self.output_dim = output_dim
         self.activation_name = activation
         self.use_batchnorm = use_batchnorm
+        self.dropout_rate = dropout_rate
 
         act_fn = ACTIVATIONS[activation]
 
-        # ─── Encoder : empile Linear → [BN] → Act ─────────────
+        # ─── Encoder : empile Linear → [BN] → Act → [Dropout] ─────────────
         encoder_modules = []
         prev = input_dim
         for h in encoder_layers:
@@ -91,15 +95,19 @@ class MLPBottleneck(nn.Module):
             if use_batchnorm:
                 encoder_modules.append(nn.BatchNorm1d(h))
             encoder_modules.append(act_fn())
+            if dropout_rate > 0.0:
+                encoder_modules.append(nn.Dropout(dropout_rate))
             prev = h
         self.encoder = nn.Sequential(*encoder_modules)
 
-        # ─── Bottleneck : Linear vers `bottleneck_dim`, SANS activation ───
+        # ─── Bottleneck : Linear vers `bottleneck_dim`, SANS activation NI dropout ───
         # Pas d'activation = espace latent brut, peut prendre n'importe
         # quelle valeur réelle. Plus expressif et plus lisible pour la viz.
+        # Pas de dropout non plus : on ne veut pas perturber la représentation
+        # latente qu'on cherche justement à visualiser proprement.
         self.bottleneck = nn.Linear(prev, bottleneck_dim)
 
-        # ─── Decoder : empile Linear → [BN] → Act, puis Linear de sortie ───
+        # ─── Decoder : empile Linear → [BN] → Act → [Dropout], puis Linear de sortie ───
         decoder_modules = []
         prev = bottleneck_dim
         for h in decoder_layers:
@@ -107,6 +115,8 @@ class MLPBottleneck(nn.Module):
             if use_batchnorm:
                 decoder_modules.append(nn.BatchNorm1d(h))
             decoder_modules.append(act_fn())
+            if dropout_rate > 0.0:
+                decoder_modules.append(nn.Dropout(dropout_rate))
             prev = h
         decoder_modules.append(nn.Linear(prev, output_dim))  # sortie : logits
         self.decoder = nn.Sequential(*decoder_modules)
@@ -132,6 +142,7 @@ class MLPBottleneck(nn.Module):
     # ─────────────────────────────────────────────
     def __repr__(self) -> str:
         bn_tag = ", batchnorm=True" if self.use_batchnorm else ""
+        dropout_tag = f", dropout={self.dropout_rate:.2f}" if self.dropout_rate > 0 else ""
         return (
             f"MLPBottleneck(input={self.input_dim}, "
             f"encoder={self.encoder_layers}, "
@@ -139,5 +150,5 @@ class MLPBottleneck(nn.Module):
             f"decoder={self.decoder_layers}, "
             f"output={self.output_dim}, "
             f"activation={self.activation_name}"
-            f"{bn_tag})"
+            f"{bn_tag}{dropout_tag})"
         )
