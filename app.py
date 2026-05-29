@@ -24,7 +24,14 @@ st.title("Visualisation d'un réseau de neurones MLP")
 # ─────────────────────────────────────────────
 st.sidebar.header("Architecture du réseau")
 
-n_hidden_layers = st.sidebar.slider("Nombre de couches cachées", 1, 4, 1)
+n_hidden_layers = st.sidebar.slider(
+    "Nombre de couches cachées", 1, 8, 1,
+    help=(
+        "Jusqu'à 8 couches. Augmenter la profondeur permet d'observer "
+        "l'aggravation exponentielle du vanishing gradient (visible via "
+        "« Suivre les gradients par couche »)."
+    ),
+)
 neurons_per_layer = st.sidebar.slider("Neurones par couche cachée", 2, 64, 8)
 activation = st.sidebar.selectbox("Fonction d'activation", ["relu", "tanh", "sigmoid"])
 use_batchnorm = st.sidebar.checkbox("Utiliser BatchNorm", value=False)
@@ -89,6 +96,16 @@ viz_mode = st.sidebar.radio(
     index=0,
 )
 live_training = st.sidebar.checkbox("Entraînement en temps réel", value=True)
+track_gradients = st.sidebar.checkbox(
+    "Suivre les gradients par couche",
+    value=False,
+    help=(
+        "Capture la norme du gradient de chaque couche à chaque époque. "
+        "Permet de diagnostiquer les vanishing gradients (gradients qui "
+        "s'écrasent vers les couches d'entrée) et les exploding gradients. "
+        "Très parlant en comparant ReLU vs sigmoid/tanh sur un réseau profond."
+    ),
+)
 boundary_refresh = st.sidebar.slider(
     "Rafraîchir la frontière toutes les N époques",
     1, 50, 10,
@@ -97,6 +114,17 @@ boundary_refresh = st.sidebar.slider(
 
 st.sidebar.header("Entraînement")
 n_epochs = st.sidebar.slider("Nombre d'époques (max)", 10, 500, 100)
+optimizer_name = st.sidebar.selectbox(
+    "Optimiseur",
+    ["Adam", "SGD"],
+    index=0,
+    help=(
+        "Adam : adaptatif, converge vite, mais masque les vanishing gradients "
+        "(il normalise les gradients par leur historique).\n"
+        "SGD : descente de gradient simple, le pas est directement proportionnel "
+        "à la norme du gradient → idéal pour observer les vanishing gradients."
+    ),
+)
 learning_rate = st.sidebar.select_slider(
     "Taux d'apprentissage",
     options=[0.001, 0.005, 0.01, 0.05, 0.1],
@@ -632,6 +660,117 @@ def plot_first_layer_lines(model: nn.Module, X: np.ndarray, y: np.ndarray):
     return fig
 
 
+def plot_gradient_flow(grad_history: dict):
+    """
+    Visualise le flux des gradients pour diagnostiquer les vanishing /
+    exploding gradients.
+
+    Produit deux sous-graphiques :
+      1. Évolution temporelle : norme L2 du gradient de chaque couche au fil
+         des époques (échelle log en y). Permet de voir si les gradients
+         s'effondrent ou explosent pendant l'entraînement.
+      2. Profil par profondeur : norme moyenne du gradient par couche, de
+         l'entrée (L0) vers la sortie. Un vanishing gradient se voit comme
+         une décroissance forte vers les couches d'entrée.
+
+    Paramètres
+    ----------
+    grad_history : dict[str, list[float]]
+        Clé = label de couche ("L0 (2→8)"), valeur = norme par époque.
+        Les couches sont supposées ordonnées de l'entrée vers la sortie
+        (ordre d'insertion, garanti par le Trainer).
+
+    Retourne
+    --------
+    matplotlib.figure.Figure
+    """
+    labels = list(grad_history.keys())
+    n_epochs = len(next(iter(grad_history.values())))
+    epochs = np.arange(1, n_epochs + 1)
+
+    fig, (ax_time, ax_depth) = plt.subplots(1, 2, figsize=(13, 5))
+
+    # ─── 1. Évolution temporelle (log y) ───
+    cmap = plt.cm.viridis(np.linspace(0, 0.9, len(labels)))
+    for color, label in zip(cmap, labels):
+        ax_time.plot(epochs, grad_history[label], label=label,
+                     color=color, linewidth=1.5)
+    ax_time.set_yscale("log")
+    ax_time.set_xlabel("Époque")
+    ax_time.set_ylabel("Norme L2 du gradient (échelle log)")
+    ax_time.set_title("Évolution des gradients par couche")
+    ax_time.legend(fontsize=8, loc="best")
+    ax_time.grid(True, which="both", alpha=0.3)
+
+    # ─── 2. Profil par profondeur (moyenne sur les dernières époques) ───
+    # On moyenne sur le dernier 20% des époques pour lisser le bruit de fin
+    # d'entraînement (au moins 1 époque).
+    tail = max(1, n_epochs // 5)
+    mean_norms = [float(np.mean(grad_history[label][-tail:])) for label in labels]
+
+    bar_colors = plt.cm.viridis(np.linspace(0, 0.9, len(labels)))
+    ax_depth.bar(range(len(labels)), mean_norms, color=bar_colors)
+    ax_depth.set_yscale("log")
+    ax_depth.set_xticks(range(len(labels)))
+    ax_depth.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
+    ax_depth.set_ylabel("Norme L2 moyenne (échelle log)")
+    ax_depth.set_title(f"Profil par profondeur (moyenne des {tail} dernières époques)")
+    ax_depth.grid(True, which="both", axis="y", alpha=0.3)
+
+    fig.tight_layout()
+    return fig
+
+
+def diagnose_gradients(grad_history: dict) -> tuple[str, str]:
+    """
+    Produit un diagnostic textuel automatique à partir de l'historique des
+    gradients (moyenne sur les dernières époques).
+
+    Retourne (niveau, message) où niveau ∈ {"success", "warning", "error"}
+    pour piloter l'affichage Streamlit (st.success / st.warning / st.error).
+    """
+    labels = list(grad_history.keys())
+    n_epochs = len(next(iter(grad_history.values())))
+    tail = max(1, n_epochs // 5)
+    mean_norms = [float(np.mean(grad_history[label][-tail:])) for label in labels]
+
+    input_norm = mean_norms[0]    # couche la plus proche de l'entrée (L0)
+    output_norm = mean_norms[-1]  # couche de sortie
+    max_norm = max(mean_norms)
+
+    # ─── Exploding : norme très élevée quelque part ───
+    if max_norm > 1e2:
+        return (
+            "error",
+            f"⚠️ Exploding gradients possible : norme max = {max_norm:.1e}. "
+            "Les gradients sont très grands — envisager un learning rate plus "
+            "faible, du gradient clipping ou de la BatchNorm.",
+        )
+
+    # ─── Vanishing : le gradient s'atténue en remontant vers l'entrée ───
+    # Indicateur direct : combien de fois le gradient s'écrase de la sortie
+    # vers la couche d'entrée. C'est la signature même du vanishing gradient.
+    depth_ratio = output_norm / input_norm if input_norm > 0 else float("inf")
+
+    if depth_ratio > 50:
+        return (
+            "warning",
+            f"⚠️ Vanishing gradient : le gradient s'écrase d'un facteur "
+            f"≈ {depth_ratio:.0f} entre la sortie ({output_norm:.1e}) et "
+            f"l'entrée ({input_norm:.1e}). Les premières couches apprennent "
+            "très lentement. Typique des activations saturantes (sigmoid/tanh) "
+            "sur un réseau profond — essayer ReLU ou la BatchNorm.",
+        )
+
+    return (
+        "success",
+        f"✅ Flux de gradient sain : le gradient reste du même ordre de "
+        f"grandeur entre l'entrée ({input_norm:.1e}) et la sortie "
+        f"({output_norm:.1e}), facteur d'atténuation ≈ {depth_ratio:.1f}. "
+        "Pas de vanishing/exploding marqué.",
+    )
+
+
 # ─────────────────────────────────────────────
 # Initialisation de st.session_state
 # ─────────────────────────────────────────────
@@ -684,7 +823,10 @@ with col2:
     status_placeholder = st.empty()
 
     if st.button("Entraîner le réseau", type="primary"):
-        optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+        if optimizer_name == "SGD":
+            optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
+        else:
+            optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
         criterion = nn.BCEWithLogitsLoss()
         trainer = Trainer(model=model, optimizer=optimizer, criterion=criterion)
 
@@ -730,6 +872,7 @@ with col2:
                 early_stopping=early_stopping,
                 on_epoch_end=callback,
                 restore_best=True,
+                track_gradients=track_gradients,
             )
 
         # Rendu final (le modèle a été restauré au best epoch grâce à restore_best=True)
@@ -929,6 +1072,34 @@ if st.session_state.trainer is not None:
         for layer_name, fig in weight_figures:
             st.pyplot(fig)
             plt.close(fig)
+
+
+# ─────────────────────────────────────────────
+# Flux des gradients (vanishing / exploding)
+# ─────────────────────────────────────────────
+if (
+    st.session_state.trainer is not None
+    and st.session_state.trainer.grad_history
+):
+    st.markdown("---")
+    st.subheader("Flux des gradients par couche")
+    st.caption(
+        "On affiche ici la norme L2 du gradient de "
+        "chaque couche : son évolution au fil des époques (à gauche) et son "
+        "profil par profondeur (à droite). Pour bien voir le phénomène, "
+        "comparer **ReLU** et **sigmoid/tanh** sur un réseau profond (≥3 couches)."
+    )
+
+    grad_history = st.session_state.trainer.grad_history
+
+    # Diagnostic automatique
+    level, message = diagnose_gradients(grad_history)
+    {"success": st.success, "warning": st.warning, "error": st.error}[level](message)
+
+    # Graphiques
+    fig_grad = plot_gradient_flow(grad_history)
+    st.pyplot(fig_grad)
+    plt.close(fig_grad)
 
 
 # ─────────────────────────────────────────────

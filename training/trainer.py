@@ -95,6 +95,10 @@ class Trainer:
         # Historique
         self.history: dict[str, list[float]] = {"train_loss": [], "val_loss": []}
 
+        # Historique des normes de gradient par couche Linear (si activé).
+        # Clé = label lisible de la couche, valeur = liste d'une norme par époque.
+        self.grad_history: dict[str, list[float]] = {}
+
         # Snapshots à chaque époque (pour le slider d'exploration)
         self.snapshots: list[dict] = []
 
@@ -107,19 +111,69 @@ class Trainer:
         self.stopped_early: bool = False
 
     # ─────────────────────────────────────────────
+    # Couches Linear — labels lisibles (pour le suivi des gradients)
+    # ─────────────────────────────────────────────
+    def _linear_layers(self) -> list[tuple[str, nn.Module]]:
+        """
+        Renvoie la liste des couches Linear du modèle, dans l'ordre du réseau,
+        avec un label lisible de la forme "L0 (2→8)".
+
+        L'ordre suit `model.modules()` : pour un nn.Sequential, c'est l'ordre
+        de l'entrée vers la sortie. La couche L0 est donc la plus proche de
+        l'entrée, la dernière la couche de sortie.
+        """
+        layers = []
+        idx = 0
+        for module in self.model.modules():
+            if isinstance(module, nn.Linear):
+                label = f"L{idx} ({module.in_features}→{module.out_features})"
+                layers.append((label, module))
+                idx += 1
+        return layers
+
+    # ─────────────────────────────────────────────
     # Boucles internes
     # ─────────────────────────────────────────────
-    def _train_one_epoch(self, loader: DataLoader) -> float:
-        """Entraîne le modèle sur une époque complète. Renvoie la loss moyenne."""
+    def _train_one_epoch(self, loader: DataLoader, track_gradients: bool = False) -> float:
+        """
+        Entraîne le modèle sur une époque complète. Renvoie la loss moyenne.
+
+        Si `track_gradients` est True, on calcule la norme L2 du gradient des
+        poids de chaque couche Linear après chaque backward, on moyenne sur
+        tous les batches de l'époque, et on stocke le résultat dans
+        `self.grad_history`. La capture se fait entre backward() et step(),
+        donc sur les gradients réellement utilisés pour la mise à jour.
+        """
         self.model.train()
         epoch_loss = 0.0
+
+        # Accumulateur des normes de gradient par couche, pour cette époque.
+        grad_accum: dict[str, float] = {}
+        n_batches = 0
+
         for X_batch, y_batch in loader:
             self.optimizer.zero_grad()
             preds = self.model(X_batch)
             loss = self.criterion(preds, y_batch)
             loss.backward()
+
+            if track_gradients:
+                for label, module in self._linear_layers():
+                    if module.weight.grad is not None:
+                        grad_accum[label] = (
+                            grad_accum.get(label, 0.0)
+                            + module.weight.grad.norm(2).item()
+                        )
+
             self.optimizer.step()
             epoch_loss += loss.item()
+            n_batches += 1
+
+        # Moyenne des normes sur les batches → une valeur par couche par époque.
+        if track_gradients and n_batches > 0:
+            for label, total in grad_accum.items():
+                self.grad_history.setdefault(label, []).append(total / n_batches)
+
         return epoch_loss / len(loader)
 
     def _validate(self, loader: DataLoader) -> float:
@@ -145,6 +199,7 @@ class Trainer:
         on_epoch_end: Optional[Callable[[int, float, Optional[float], nn.Module], None]] = None,
         save_snapshots: bool = True,
         restore_best: bool = True,
+        track_gradients: bool = False,
     ) -> dict[str, list[float]]:
         """
         Entraîne le modèle sur n_epochs époques.
@@ -173,6 +228,10 @@ class Trainer:
             Si True (défaut), à la fin de l'entraînement le modèle est
             restauré à l'état où il avait la meilleure val_loss.
             Sans effet si val_loader n'est pas fourni.
+        track_gradients : bool
+            Si True, capture la norme L2 du gradient de chaque couche Linear
+            à chaque époque (moyennée sur les batches) dans `self.grad_history`.
+            Permet de diagnostiquer les vanishing/exploding gradients.
 
         Retourne
         --------
@@ -186,7 +245,7 @@ class Trainer:
 
         for epoch in range(n_epochs):
             # ─── Phase entraînement ───
-            train_loss = self._train_one_epoch(train_loader)
+            train_loss = self._train_one_epoch(train_loader, track_gradients=track_gradients)
             self.history["train_loss"].append(train_loss)
 
             # ─── Phase validation ───
