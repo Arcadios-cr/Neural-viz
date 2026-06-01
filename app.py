@@ -159,6 +159,10 @@ dataset_name = st.sidebar.selectbox(
     index=0,
     help=(
         "⭐ Two Gaussians — trivial (linéairement séparable)\n"
+        "🔀 Chevauchants (Overlap / Blobs / Classification / Gaussian Quantiles) "
+        "— classes qui se recouvrent, pas de frontière parfaite : idéal pour "
+        "observer l'overfitting / la dentelle et la généralisation\n"
+        "🏁 Checkerboard — damier : demande beaucoup de frontières (de plans)\n"
         "⭐⭐ Moons / Circles / XOR — non linéairement séparables, simples\n"
         "⭐⭐⭐ Sinusoidal / Islands — frontières complexes\n"
         "⭐⭐⭐⭐ Spirals — le boss final"
@@ -166,7 +170,18 @@ dataset_name = st.sidebar.selectbox(
 )
 n_samples = st.sidebar.slider("Nombre de points", 100, 500, 200)
 noise = st.sidebar.slider("Niveau de bruit", 0.0, 1.0, 0.2, step=0.05)
-seed = st.sidebar.number_input("Seed", value=42, step=1)
+seed = st.sidebar.number_input("Seed (données)", value=42, step=1)
+weight_seed = st.sidebar.number_input(
+    "Seed (initialisation des poids)",
+    value=0, step=1,
+    help=(
+        "Fixe l'initialisation aléatoire des poids du réseau ET l'ordre de "
+        "mélange des batches. À seed identique, deux entraînements donnent "
+        "exactement le même résultat (reproductibilité). Changer ce seed en "
+        "gardant le reste identique permet d'observer la variance due à "
+        "l'initialisation."
+    ),
+)
 
 
 # ─────────────────────────────────────────────
@@ -188,6 +203,10 @@ test_loader  = to_dataloader(X_test,  y_test,  batch_size=batch_size, shuffle=Fa
 # ─────────────────────────────────────────────
 # Construction du modèle
 # ─────────────────────────────────────────────
+# On fixe le générateur aléatoire de PyTorch juste avant de créer le modèle :
+# l'initialisation des poids des couches Linear devient ainsi reproductible.
+torch.manual_seed(int(weight_seed))
+
 if use_bottleneck:
     # ─── Encoder : symétrique OU en entonnoir ───
     if funnel_encoder:
@@ -864,6 +883,10 @@ with col2:
             loss_placeholder.line_chart(chart_data)
 
         callback = update_callback if live_training else None
+        # Re-fixe le générateur juste avant l'entraînement : rend déterministes
+        # le mélange des batches (shuffle) et le dropout. Combiné au seed de
+        # l'init des poids, l'entraînement entier est alors reproductible.
+        torch.manual_seed(int(weight_seed))
         with st.spinner("Entraînement en cours..."):
             history = trainer.train(
                 train_loader=train_loader,

@@ -1,6 +1,12 @@
 import numpy as np
 import torch
-from sklearn.datasets import make_moons as sk_make_moons, make_circles as sk_make_circles
+from sklearn.datasets import (
+    make_moons as sk_make_moons,
+    make_circles as sk_make_circles,
+    make_blobs as sk_make_blobs,
+    make_classification as sk_make_classification,
+    make_gaussian_quantiles as sk_make_gaussian_quantiles,
+)
 from torch.utils.data import TensorDataset, DataLoader
 
 
@@ -30,6 +36,131 @@ def make_gaussians(
     X1 = rng.normal(loc=[1.0, 1.0], scale=noise, size=(n_per_class, 2))
     X = np.vstack([X0, X1])
     y = np.array([0] * n_per_class + [1] * n_per_class)
+    return _shuffle(X, y, rng)
+
+
+def make_overlap(
+    n_samples: int = 200,
+    noise: float = 0.5,
+    seed: int = 42,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Deux gaussiennes volontairement CHEVAUCHANTES (classes emmêlées).
+
+    Les deux centres sont proches (-0.7, 0) et (0.7, 0), et l'écart-type
+    augmente avec `noise`. Au-delà d'un certain bruit, les deux nuages se
+    recouvrent : il n'existe alors AUCUNE frontière parfaite (l'erreur
+    minimale possible est > 0).
+
+    C'est le dataset idéal pour observer :
+      - la "dentelle" : sans régularisation, le réseau crée des frontières
+        tarabiscotées pour capturer les points isolés de la classe adverse
+        (overfitting) ;
+      - l'effet du dropout : avec régularisation, la frontière redevient lisse ;
+      - la généralisation : l'écart entre la performance sur le train et sur
+        le test grandit quand le réseau fait trop de dentelle.
+    """
+    rng = np.random.default_rng(seed)
+    n_per_class = n_samples // 2
+    # Plus de bruit => écart-type plus grand => chevauchement plus fort.
+    scale = 0.4 + noise
+    X0 = rng.normal(loc=[-0.7, 0.0], scale=scale, size=(n_per_class, 2))
+    X1 = rng.normal(loc=[0.7, 0.0],  scale=scale, size=(n_per_class, 2))
+    X = np.vstack([X0, X1])
+    y = np.array([0] * n_per_class + [1] * n_per_class)
+    return _shuffle(X, y, rng)
+
+
+def make_blobs(
+    n_samples: int = 200,
+    noise: float = 0.5,
+    seed: int = 42,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Deux blobs gaussiens (sklearn make_blobs), chevauchement piloté par `noise`.
+
+    `cluster_std` augmente avec le bruit → les deux nuages se recouvrent de plus
+    en plus. Avantage : la même mécanique se généralise directement à K classes
+    (il suffira d'ajouter des centres) pour le futur module multi-classes.
+    """
+    centers = [[-1.5, 0.0], [1.5, 0.0]]
+    cluster_std = 0.5 + 1.2 * noise
+    X, y = sk_make_blobs(
+        n_samples=n_samples, centers=centers,
+        cluster_std=cluster_std, random_state=seed,
+    )
+    rng = np.random.default_rng(seed)
+    return _shuffle(X, y, rng)
+
+
+def make_classif(
+    n_samples: int = 200,
+    noise: float = 0.3,
+    seed: int = 42,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Dataset de classification standard (sklearn make_classification).
+
+    `noise` pilote DEUX sources de difficulté à la fois :
+      - `class_sep` (séparation des classes) qui DIMINUE avec le bruit
+        → les classes se rapprochent et se chevauchent ;
+      - `flip_y` (bruit d'étiquette) qui AUGMENTE avec le bruit
+        → certains points sont volontairement mal étiquetés (points aberrants).
+    Idéal pour observer si le réseau généralise ou s'il sur-apprend les aberrants.
+    """
+    X, y = sk_make_classification(
+        n_samples=n_samples,
+        n_features=2, n_informative=2, n_redundant=0, n_repeated=0,
+        n_clusters_per_class=1,
+        class_sep=max(0.2, 2.0 - 1.8 * noise),
+        flip_y=0.10 * noise,
+        random_state=seed,
+    )
+    rng = np.random.default_rng(seed)
+    return _shuffle(X, y, rng)
+
+
+def make_quantiles(
+    n_samples: int = 200,
+    noise: float = 0.2,
+    seed: int = 42,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Classes en anneaux concentriques gaussiens (sklearn make_gaussian_quantiles).
+
+    Le cœur du nuage est une classe, la couronne extérieure l'autre — séparation
+    par un cercle, mais avec un recouvrement gaussien naturel. `noise` ajoute du
+    bruit sur les coordonnées pour accentuer le chevauchement. Se généralise
+    aussi à K classes (anneaux successifs).
+    """
+    X, y = sk_make_gaussian_quantiles(
+        n_samples=n_samples, n_features=2, n_classes=2, random_state=seed,
+    )
+    rng = np.random.default_rng(seed)
+    X = X + rng.normal(scale=noise * 0.3, size=X.shape)
+    return _shuffle(X, y, rng)
+
+
+def make_checkerboard(
+    n_samples: int = 200,
+    noise: float = 0.1,
+    seed: int = 42,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Damier (échiquier) : la classe alterne comme les cases d'un échiquier.
+
+    Sur le plan [-2, 2]², chaque case unité a une classe selon la parité
+    (⌊x⌋ + ⌊y⌋) % 2. Cela crée de nombreuses régions alternées, donc le réseau
+    doit apprendre BEAUCOUP de frontières linéaires (= beaucoup de neurones en
+    première couche). `noise` déplace légèrement les points. Excellent cas pour
+    étudier la capacité du réseau et le contrôle de la première couche.
+    """
+    rng = np.random.default_rng(seed)
+    X = rng.uniform(-2.0, 2.0, size=(n_samples, 2))
+    gx = np.floor(X[:, 0])
+    gy = np.floor(X[:, 1])
+    y = ((gx + gy) % 2).astype(int)
+    X = X + rng.normal(scale=noise * 0.2, size=X.shape)
     return _shuffle(X, y, rng)
 
 
@@ -226,13 +357,18 @@ def make_spirals(
 # Dispatcher : permet d'appeler un dataset par son nom
 # ─────────────────────────────────────────────
 DATASETS = {
-    "Two Gaussians":   make_gaussians,
-    "Moons":           make_moons,
-    "Circles":         make_circles,
-    "XOR":             make_xor,
-    "Sinusoidal":      make_sinusoidal,
-    "Islands":         make_islands,
-    "Spirals":         make_spirals,
+    "Two Gaussians":      make_gaussians,
+    "Overlap":            make_overlap,
+    "Blobs":              make_blobs,
+    "Classification":     make_classif,
+    "Gaussian Quantiles": make_quantiles,
+    "Checkerboard":       make_checkerboard,
+    "Moons":              make_moons,
+    "Circles":            make_circles,
+    "XOR":                make_xor,
+    "Sinusoidal":         make_sinusoidal,
+    "Islands":            make_islands,
+    "Spirals":            make_spirals,
 }
 
 
