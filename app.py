@@ -203,45 +203,60 @@ test_loader  = to_dataloader(X_test,  y_test,  batch_size=batch_size, shuffle=Fa
 # ─────────────────────────────────────────────
 # Construction du modèle
 # ─────────────────────────────────────────────
-# On fixe le générateur aléatoire de PyTorch juste avant de créer le modèle :
-# l'initialisation des poids des couches Linear devient ainsi reproductible.
-torch.manual_seed(int(weight_seed))
+def build_model():
+    """
+    Construit un modèle NEUF à partir de la configuration actuelle de la
+    sidebar. Factorisé pour être réutilisable : flux principal d'entraînement
+    ET évaluation k-fold (qui reconstruit un modèle frais à chaque fold).
+    """
+    if use_bottleneck:
+        # ─── Encoder : symétrique OU en entonnoir ───
+        if funnel_encoder:
+            # Sizes décroissantes : [n, max(n/2, 4), max(n/4, 4), ...]
+            encoder_layers = []
+            size = neurons_per_layer
+            for _ in range(n_hidden_layers):
+                encoder_layers.append(max(size, 4))   # min 4 neurones pour garder du sens
+                size = size // 2
+        else:
+            encoder_layers = [neurons_per_layer] * n_hidden_layers
 
-if use_bottleneck:
-    # ─── Encoder : symétrique OU en entonnoir ───
-    if funnel_encoder:
-        # Sizes décroissantes : [n, max(n/2, 4), max(n/4, 4), ...]
-        encoder_layers = []
-        size = neurons_per_layer
-        for _ in range(n_hidden_layers):
-            encoder_layers.append(max(size, 4))   # min 4 neurones pour garder du sens
-            size = size // 2
+        # ─── Décodeur (la "tête") : indépendamment configuré ───
+        decoder_layers = [head_neurons] * head_layers
+
+        return MLPBottleneck(
+            input_dim=2,
+            encoder_layers=encoder_layers,
+            bottleneck_dim=bottleneck_dim,
+            decoder_layers=decoder_layers,
+            output_dim=1,
+            activation=activation,
+            use_batchnorm=use_batchnorm,
+            dropout_rate=dropout_rate,
+        )
     else:
-        encoder_layers = [neurons_per_layer] * n_hidden_layers
+        hidden_layers = [neurons_per_layer] * n_hidden_layers
+        return MLP(
+            input_dim=2,
+            hidden_layers=hidden_layers,
+            output_dim=1,
+            activation=activation,
+            use_batchnorm=use_batchnorm,
+            dropout_rate=dropout_rate,
+        )
 
-    # ─── Décodeur (la "tête") : indépendamment configuré ───
-    decoder_layers = [head_neurons] * head_layers
 
-    model = MLPBottleneck(
-        input_dim=2,
-        encoder_layers=encoder_layers,
-        bottleneck_dim=bottleneck_dim,
-        decoder_layers=decoder_layers,
-        output_dim=1,
-        activation=activation,
-        use_batchnorm=use_batchnorm,
-        dropout_rate=dropout_rate,
-    )
-else:
-    hidden_layers = [neurons_per_layer] * n_hidden_layers
-    model = MLP(
-        input_dim=2,
-        hidden_layers=hidden_layers,
-        output_dim=1,
-        activation=activation,
-        use_batchnorm=use_batchnorm,
-        dropout_rate=dropout_rate,
-    )
+def make_optimizer(m):
+    """Crée l'optimiseur choisi dans la sidebar pour le modèle donné."""
+    if optimizer_name == "SGD":
+        return torch.optim.SGD(m.parameters(), lr=learning_rate)
+    return torch.optim.Adam(m.parameters(), lr=learning_rate)
+
+
+# On fixe le générateur aléatoire juste avant de créer le modèle :
+# l'initialisation des poids devient reproductible.
+torch.manual_seed(int(weight_seed))
+model = build_model()
 
 st.sidebar.markdown("---")
 st.sidebar.markdown(f"**Modèle :** `{model}`")
@@ -790,6 +805,80 @@ def diagnose_gradients(grad_history: dict) -> tuple[str, str]:
     )
 
 
+def plot_generalization(model, X_train, y_train, X_test, y_test, mode="logits"):
+    """
+    Frontière de décision avec les points de TEST superposés (jamais vus
+    pendant l'entraînement). Les points de test MAL classés sont entourés
+    de noir.
+
+    Permet de VOIR la généralisation : si la frontière (apprise sur le train)
+    place correctement des points nouveaux, le réseau généralise ; si beaucoup
+    de points de test tombent du mauvais côté (surtout là où la frontière fait
+    de la dentelle), c'est de l'overfitting.
+    """
+    # Bornes calculées sur train + test pour tout afficher
+    X_all = np.vstack([X_train, X_test])
+    x_min, x_max = X_all[:, 0].min() - 0.5, X_all[:, 0].max() + 0.5
+    y_min, y_max = X_all[:, 1].min() - 0.5, X_all[:, 1].max() + 0.5
+    xx, yy = np.meshgrid(
+        np.linspace(x_min, x_max, 300),
+        np.linspace(y_min, y_max, 300),
+    )
+    grid = np.c_[xx.ravel(), yy.ravel()].astype(np.float32)
+
+    model.eval()
+    with torch.no_grad():
+        logits = model(torch.tensor(grid)).numpy().reshape(xx.shape)
+        test_logits = model(torch.tensor(X_test.astype(np.float32))).numpy().squeeze(-1)
+
+    # Prédiction sur le test (seuil 0 sur les logits = proba 0.5)
+    test_pred = (test_logits > 0).astype(int)
+    y_test_int = y_test.astype(int)
+    misclassified = test_pred != y_test_int
+
+    if mode == "probas":
+        Z = 1 / (1 + np.exp(-logits))
+        boundary_level, cbar_label = 0.5, "P(classe 1)"
+        vmin, vmax = 0.0, 1.0
+    else:
+        Z = logits
+        boundary_level, cbar_label = 0.0, "Logits (sortie brute)"
+        amax = max(abs(Z.min()), abs(Z.max()))
+        vmin, vmax = -amax, amax
+
+    fig, ax = plt.subplots(figsize=(7, 6))
+    contour = ax.contourf(xx, yy, Z, levels=50, cmap="RdYlBu_r", alpha=0.8, vmin=vmin, vmax=vmax)
+    plt.colorbar(contour, ax=ax, label=cbar_label)
+    ax.contour(xx, yy, Z, levels=[boundary_level], colors="black", linewidths=1.5)
+
+    # Points de test colorés par vraie classe
+    colors = ["#2196F3", "#F44336"]
+    for cls in [0, 1]:
+        m = y_test_int == cls
+        ax.scatter(X_test[m, 0], X_test[m, 1], c=colors[cls],
+                   edgecolors="white", linewidths=0.5, s=45,
+                   label=f"Test classe {cls}", zorder=3)
+
+    # Points de test MAL classés : entourés de noir
+    if misclassified.any():
+        ax.scatter(X_test[misclassified, 0], X_test[misclassified, 1],
+                   s=160, facecolors="none", edgecolors="black",
+                   linewidths=1.8, zorder=4,
+                   label=f"Mal classé ({int(misclassified.sum())})")
+
+    ax.set_xlabel("x₁")
+    ax.set_ylabel("x₂")
+    n_err = int(misclassified.sum())
+    n_tot = len(y_test_int)
+    ax.set_title(
+        f"Généralisation : points de TEST sur la frontière\n"
+        f"{n_tot - n_err}/{n_tot} bien classés "
+        f"({100 * (n_tot - n_err) / n_tot:.1f}% test accuracy)"
+    )
+    ax.legend(fontsize=8, loc="best")
+    return fig
+
+
 # ─────────────────────────────────────────────
 # Initialisation de st.session_state
 # ─────────────────────────────────────────────
@@ -803,6 +892,9 @@ if "trainer" not in st.session_state:
     st.session_state.trained_mode = None
     st.session_state.test_loader = None
     st.session_state.test_report = None
+    st.session_state.train_report = None      # métriques sur le train (pour l'écart train/test)
+    st.session_state.test_X = None            # points de test (pour la viz de généralisation)
+    st.session_state.test_y = None
 
 
 # ─────────────────────────────────────────────
@@ -842,10 +934,7 @@ with col2:
     status_placeholder = st.empty()
 
     if st.button("Entraîner le réseau", type="primary"):
-        if optimizer_name == "SGD":
-            optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
-        else:
-            optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+        optimizer = make_optimizer(model)
         criterion = nn.BCEWithLogitsLoss()
         trainer = Trainer(model=model, optimizer=optimizer, criterion=criterion)
 
@@ -923,6 +1012,9 @@ with col2:
         # Évaluation finale sur le test set (jamais vu pendant l'entraînement)
         # On utilise le modèle restauré au best epoch (grâce à restore_best=True).
         test_report = evaluate(model, test_loader)
+        # On évalue AUSSI sur le train : l'écart train↔test mesure l'overfitting
+        # (gros écart = le réseau mémorise au lieu de généraliser).
+        train_report = evaluate(model, train_loader)
 
         # Persistance pour le slider d'exploration et l'affichage des métriques
         st.session_state.trainer = trainer
@@ -931,6 +1023,9 @@ with col2:
         st.session_state.trained_mode = mode
         st.session_state.test_loader = test_loader
         st.session_state.test_report = test_report
+        st.session_state.train_report = train_report
+        st.session_state.test_X = X_test
+        st.session_state.test_y = y_test
     else:
         # S'il n'y a pas eu d'entraînement encore, on affiche le message d'invite
         if st.session_state.trainer is None:
@@ -1191,7 +1286,76 @@ if st.session_state.trainer is not None:
             st.session_state.trained_mode = None
             st.session_state.test_loader = None
             st.session_state.test_report = None
+            st.session_state.train_report = None
+            st.session_state.test_X = None
+            st.session_state.test_y = None
             st.rerun()
+
+
+# ─────────────────────────────────────────────
+# Généralisation — train vs test
+# ─────────────────────────────────────────────
+if (
+    st.session_state.train_report is not None
+    and st.session_state.test_report is not None
+    and st.session_state.test_X is not None
+):
+    st.markdown("---")
+    st.subheader("Généralisation — le réseau tient-il sur des données jamais vues ?")
+    st.caption(
+        "On compare la performance sur les données d'entraînement (vues) et sur "
+        "le test (jamais vues). Un grand écart train → test signale de "
+        "l'**overfitting** : le réseau a mémorisé le train au lieu d'apprendre "
+        "la règle générale."
+    )
+
+    tr = st.session_state.train_report
+    te = st.session_state.test_report
+    gap = tr.accuracy - te.accuracy
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.metric("Accuracy train", f"{tr.accuracy * 100:.1f} %")
+    with c2:
+        st.metric("Accuracy test", f"{te.accuracy * 100:.1f} %")
+    with c3:
+        st.metric(
+            "Écart train → test", f"{gap * 100:+.1f} pts",
+            help="train − test. Proche de 0 = généralise bien. Grand = overfitting.",
+        )
+
+    # Diagnostic automatique de l'écart
+    if gap > 0.15:
+        st.warning(
+            f"⚠️ Overfitting marqué : {gap * 100:.0f} points de mieux sur le "
+            "train que sur le test → le réseau mémorise au lieu de généraliser. "
+            "Pistes : dropout, moins de capacité, plus de points, early stopping."
+        )
+    elif gap > 0.05:
+        st.info(f"ℹ️ Léger overfitting ({gap * 100:.0f} pts d'écart train → test). À surveiller.")
+    else:
+        st.success(
+            f"✅ Bonne généralisation : seulement {gap * 100:.0f} pts d'écart "
+            "train → test. Le réseau se comporte presque aussi bien sur des "
+            "données nouvelles."
+        )
+
+    # Frontière avec les points de test (mal classés entourés).
+    # On restaure le best epoch : le slider d'exploration a pu déplacer le modèle.
+    if st.session_state.trainer.best_state_dict is not None:
+        st.session_state.trainer.model.load_state_dict(
+            st.session_state.trainer.best_state_dict
+        )
+    fig_gen = plot_generalization(
+        st.session_state.trainer.model,
+        st.session_state.trained_X,
+        st.session_state.trained_y,
+        st.session_state.test_X,
+        st.session_state.test_y,
+        mode=st.session_state.trained_mode,
+    )
+    st.pyplot(fig_gen)
+    plt.close(fig_gen)
 
 
 # ─────────────────────────────────────────────
