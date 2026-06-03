@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 import matplotlib.pyplot as plt
+from sklearn.model_selection import StratifiedKFold
 
 from models.mlp import MLP
 from models.mlp_bottleneck import MLPBottleneck
@@ -879,6 +880,70 @@ def plot_generalization(model, X_train, y_train, X_test, y_test, mode="logits"):
     return fig
 
 
+def run_kfold(X, y, k, n_epochs, batch_size, progress=None):
+    """
+    Validation croisée k-fold stratifiée (équilibre des classes par fold).
+
+    Découpe (X, y) en k folds. Pour chaque fold : reconstruit un modèle NEUF
+    (config actuelle de la sidebar), l'entraîne sur les k-1 autres folds, puis
+    l'évalue sur le fold restant. Renvoie le tableau des accuracies de test.
+
+    Donne une estimation plus robuste de la généralisation qu'un seul split
+    (accuracy moyenne ± écart-type) — utile surtout sur les petits datasets,
+    où un découpage unique peut être chanceux ou malchanceux.
+    """
+    skf = StratifiedKFold(n_splits=k, shuffle=True, random_state=int(weight_seed))
+    accs = []
+    for i, (tr_idx, te_idx) in enumerate(skf.split(X, y)):
+        X_tr, y_tr = X[tr_idx], y[tr_idx]
+        X_te, y_te = X[te_idx], y[te_idx]
+
+        loader_tr = to_dataloader(X_tr, y_tr, batch_size=batch_size, shuffle=True)
+        torch.manual_seed(int(weight_seed))          # init reproductible
+        m = build_model()
+        trainer_k = Trainer(m, make_optimizer(m), nn.BCEWithLogitsLoss())
+        torch.manual_seed(int(weight_seed))          # shuffle + dropout
+        trainer_k.train(
+            loader_tr, n_epochs=n_epochs,
+            save_snapshots=False, restore_best=False,
+        )
+        rep = evaluate(m, to_dataloader(X_te, y_te, batch_size=batch_size, shuffle=False))
+        accs.append(rep.accuracy)
+        if progress is not None:
+            progress.progress((i + 1) / k, text=f"Fold {i + 1}/{k} — accuracy {rep.accuracy * 100:.1f}%")
+    return np.array(accs)
+
+
+def plot_kfold(accs):
+    """
+    Bar chart de l'accuracy de chaque fold, avec la ligne de moyenne et la
+    bande ± écart-type. Rend la dispersion visible : des barres regroupées =
+    performance stable ; des barres dispersées = sensible au découpage.
+    """
+    k = len(accs)
+    mean, std = accs.mean(), accs.std()
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+    colors = plt.cm.viridis(np.linspace(0.25, 0.8, k))
+    ax.bar(range(1, k + 1), accs * 100, color=colors, edgecolor="white", zorder=3)
+
+    # Moyenne + bande ± écart-type
+    ax.axhspan((mean - std) * 100, (mean + std) * 100, color="gray", alpha=0.15,
+               zorder=1, label=f"± écart-type ({std * 100:.1f} pts)")
+    ax.axhline(mean * 100, color="black", linestyle="--", linewidth=1.5,
+               zorder=2, label=f"moyenne {mean * 100:.1f} %")
+
+    ax.set_xticks(range(1, k + 1))
+    ax.set_xticklabels([f"Fold {i}" for i in range(1, k + 1)])
+    ax.set_ylabel("Accuracy test (%)")
+    ax.set_ylim(max(0, accs.min() * 100 - 10), min(100, accs.max() * 100 + 10))
+    ax.set_title(f"Accuracy par fold (validation croisée k={k})")
+    ax.legend(loc="best", fontsize=9)
+    ax.grid(axis="y", alpha=0.3)
+    fig.tight_layout()
+    return fig
+
+
 # ─────────────────────────────────────────────
 # Initialisation de st.session_state
 # ─────────────────────────────────────────────
@@ -1356,6 +1421,46 @@ if (
     )
     st.pyplot(fig_gen)
     plt.close(fig_gen)
+
+
+# ─────────────────────────────────────────────
+# Évaluation robuste : validation croisée k-fold
+# ─────────────────────────────────────────────
+st.markdown("---")
+with st.expander("Évaluation robuste — validation croisée (k-fold)"):
+    st.caption(
+        "Un seul découpage train/test peut être chanceux. La validation croisée "
+        "k-fold entraîne le modèle sur **k découpages différents** et moyenne les "
+        "résultats → estimation plus fiable de la généralisation "
+        "(**accuracy moyenne ± écart-type**), surtout utile sur les petits "
+        "datasets. ⚠️ Entraîne k modèles, donc plus long. Utilise l'architecture "
+        "et les hyperparamètres configurés dans la sidebar."
+    )
+    kfold_k = st.slider("Nombre de folds (k)", 3, 10, 5)
+    if st.button("Lancer l'évaluation k-fold"):
+        prog = st.progress(0.0, text="Démarrage…")
+        with st.spinner("Validation croisée en cours…"):
+            accs = run_kfold(X, y, kfold_k, n_epochs, batch_size, progress=prog)
+        prog.empty()
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.metric("Accuracy moyenne", f"{accs.mean() * 100:.1f} %")
+        with c2:
+            st.metric("Écart-type", f"± {accs.std() * 100:.1f} pts")
+        with c3:
+            st.metric("Min – Max", f"{accs.min() * 100:.0f} – {accs.max() * 100:.0f} %")
+
+        st.caption(
+            f"Accuracy par fold : {', '.join(f'{a * 100:.0f}%' for a in accs)}. "
+            "Un écart-type faible = performance stable d'un découpage à l'autre "
+            "(le modèle ne dépend pas d'un split chanceux)."
+        )
+
+        # Graphe de la dispersion des folds
+        fig_kf = plot_kfold(accs)
+        st.pyplot(fig_kf)
+        plt.close(fig_kf)
 
 
 # ─────────────────────────────────────────────
