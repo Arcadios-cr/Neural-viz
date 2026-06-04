@@ -34,6 +34,21 @@ n_hidden_layers = st.sidebar.slider(
     ),
 )
 neurons_per_layer = st.sidebar.slider("Neurones par couche cachée", 2, 64, 8)
+control_first_layer = st.sidebar.checkbox(
+    "Contrôler la 1ère couche séparément",
+    value=False,
+    help=(
+        "Chaque neurone de la 1ère couche calcule une droite de séparation "
+        "dans le plan d'entrée. Plus de neurones en 1ère couche = plus de "
+        "« plans » pour découper des frontières complexes (ex : damier). "
+        "Visible via « Afficher les poids appris » (droites de la 1ère couche)."
+    ),
+)
+first_layer_neurons = st.sidebar.slider(
+    "Neurones de la 1ère couche", 2, 128, 16,
+    disabled=not control_first_layer,
+    help="Nombre de droites de séparation apprises directement sur l'entrée.",
+)
 activation = st.sidebar.selectbox("Fonction d'activation", ["relu", "tanh", "sigmoid"])
 use_batchnorm = st.sidebar.checkbox("Utiliser BatchNorm", value=False)
 dropout_rate = st.sidebar.slider(
@@ -55,13 +70,14 @@ use_bottleneck = st.sidebar.checkbox(
 )
 bottleneck_dim = st.sidebar.radio(
     "Dimension de l'espace latent",
-    [2, 3],
-    index=0,
+    [1, 2, 3],
+    index=1,
     horizontal=True,
     help=(
+        "1D : le réseau doit tout résumer en UN seul nombre — test extrême "
+        "(le problème est-il assez simple pour tenir sur une ligne ?).\n"
         "2D : scatter plot statique (matplotlib).\n"
-        "3D : scatter plot interactif rotatif (Plotly) — permet de tourner "
-        "autour de l'espace latent à la souris pour voir tous les angles."
+        "3D : scatter plot interactif rotatif (Plotly)."
     ),
     disabled=not use_bottleneck,
 )
@@ -222,6 +238,10 @@ def build_model():
         else:
             encoder_layers = [neurons_per_layer] * n_hidden_layers
 
+        # ─── Contrôle indépendant de la 1ère couche (nombre de "plans") ───
+        if control_first_layer:
+            encoder_layers[0] = first_layer_neurons
+
         # ─── Décodeur (la "tête") : indépendamment configuré ───
         decoder_layers = [head_neurons] * head_layers
 
@@ -237,6 +257,9 @@ def build_model():
         )
     else:
         hidden_layers = [neurons_per_layer] * n_hidden_layers
+        # ─── Contrôle indépendant de la 1ère couche (nombre de "plans") ───
+        if control_first_layer:
+            hidden_layers[0] = first_layer_neurons
         return MLP(
             input_dim=2,
             hidden_layers=hidden_layers,
@@ -332,6 +355,56 @@ def plot_decision_boundary(model, X, y, mode: str = "logits"):
     ax.set_ylabel("x₂")
     ax.set_title(f"Frontière de décision ({'logits' if mode == 'logits' else 'probabilités'})")
     ax.legend()
+    return fig
+
+
+def plot_latent_space_1d(model: MLPBottleneck, X: np.ndarray, y: np.ndarray):
+    """
+    Affiche la représentation 1D de X dans l'espace latent (bottleneck à 1
+    neurone) appris par le réseau.
+
+    Chaque point d'entrée est résumé en UN seul nombre z₁. On affiche :
+      - en haut : un strip plot (chaque point placé sur l'axe z₁, avec un
+        léger jitter vertical pour les distinguer), coloré par classe ;
+      - en bas : l'histogramme de z₁ pour chaque classe.
+
+    Lecture : si les deux classes occupent des plages de z₁ **séparées**, le
+    réseau a réussi à les ranger sur une seule dimension (le problème tient
+    sur une ligne). Si elles se **chevauchent** en z₁, une seule dimension ne
+    suffit pas — il faut un bottleneck plus large.
+    """
+    model.eval()
+    with torch.no_grad():
+        z = model.encode(torch.tensor(X, dtype=torch.float32)).numpy().ravel()
+
+    colors = ["#2196F3", "#F44336"]
+    rng = np.random.default_rng(0)
+
+    fig, (ax_strip, ax_hist) = plt.subplots(
+        2, 1, figsize=(8, 5), sharex=True,
+        gridspec_kw={"height_ratios": [1, 2]},
+    )
+
+    # ─── Strip plot : points sur l'axe z₁ + jitter vertical ───
+    for cls in [0, 1]:
+        m = y == cls
+        jitter = rng.uniform(-0.4, 0.4, size=int(m.sum()))
+        ax_strip.scatter(z[m], cls + jitter, c=colors[cls], s=25,
+                         edgecolors="white", linewidths=0.4, alpha=0.8)
+    ax_strip.set_yticks([0, 1])
+    ax_strip.set_yticklabels(["Classe 0", "Classe 1"])
+    ax_strip.set_title("Espace latent 1D — chaque point résumé en un seul nombre z₁")
+
+    # ─── Histogrammes de z₁ par classe ───
+    bins = np.linspace(z.min(), z.max(), 40)
+    for cls in [0, 1]:
+        m = y == cls
+        ax_hist.hist(z[m], bins=bins, color=colors[cls], alpha=0.55,
+                     label=f"Classe {cls}")
+    ax_hist.set_xlabel("z₁ (unique neurone du bottleneck)")
+    ax_hist.set_ylabel("Nombre de points")
+    ax_hist.legend()
+    fig.tight_layout()
     return fig
 
 
@@ -1142,7 +1215,12 @@ if (
         plt.close(fig_in)
 
     with col_lat:
-        if latent_dim == 2:
+        if latent_dim == 1:
+            st.markdown("**Espace latent 1D** (sortie du bottleneck — un seul nombre)")
+            fig_lat1d = plot_latent_space_1d(bm, bX, by)
+            st.pyplot(fig_lat1d)
+            plt.close(fig_lat1d)
+        elif latent_dim == 2:
             st.markdown("**Espace latent** (sortie du bottleneck 2D)")
             fig_lat = plot_latent_space(bm, bX, by)
             st.pyplot(fig_lat)
