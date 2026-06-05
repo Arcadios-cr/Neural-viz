@@ -147,7 +147,23 @@ learning_rate = st.sidebar.select_slider(
     options=[0.001, 0.005, 0.01, 0.05, 0.1],
     value=0.01,
 )
-batch_size = st.sidebar.slider("Batch size", 8, 64, 32)
+batch_size = st.sidebar.slider(
+    "Batch size", 8, 128, 32,
+    help=(
+        "Taille des lots. Petits batch = gradient plus bruité → minima plus "
+        "« plats » → souvent meilleure généralisation. Gros batch = plus rapide "
+        "mais peut moins bien généraliser."
+    ),
+)
+weight_decay = st.sidebar.select_slider(
+    "Weight decay (régularisation L2)",
+    options=[0.0, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1],
+    value=0.0,
+    help=(
+        "Pénalise les poids trop grands → régularisation. Alternative ou "
+        "complément au dropout pour réduire l'overfitting. 0 = désactivé."
+    ),
+)
 
 st.sidebar.subheader("Split train / validation / test")
 train_ratio = st.sidebar.slider("Ratio train", 0.4, 0.8, 0.6, step=0.05)
@@ -185,7 +201,14 @@ dataset_name = st.sidebar.selectbox(
         "⭐⭐⭐⭐ Spirals — le boss final"
     ),
 )
-n_samples = st.sidebar.slider("Nombre de points", 100, 500, 200)
+n_samples = st.sidebar.slider(
+    "Nombre de points", 50, 1000, 200,
+    help=(
+        "Densité du dataset. Peu de points → le réseau mémorise facilement "
+        "(overfitting, dentelle) ; beaucoup de points → il doit apprendre la "
+        "vraie règle (meilleure généralisation)."
+    ),
+)
 noise = st.sidebar.slider("Niveau de bruit", 0.0, 1.0, 0.2, step=0.05)
 seed = st.sidebar.number_input("Seed (données)", value=42, step=1)
 weight_seed = st.sidebar.number_input(
@@ -273,8 +296,8 @@ def build_model():
 def make_optimizer(m):
     """Crée l'optimiseur choisi dans la sidebar pour le modèle donné."""
     if optimizer_name == "SGD":
-        return torch.optim.SGD(m.parameters(), lr=learning_rate)
-    return torch.optim.Adam(m.parameters(), lr=learning_rate)
+        return torch.optim.SGD(m.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    return torch.optim.Adam(m.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
 
 # On fixe le générateur aléatoire juste avant de créer le modèle :

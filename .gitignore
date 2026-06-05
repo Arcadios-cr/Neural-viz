@@ -35,3 +35,6 @@ Thumbs.db
 *.csv
 *.pkl
 *.pt
+
+# Figures générées par les scripts d'expérimentation (régénérables)
+experiments/figures/
