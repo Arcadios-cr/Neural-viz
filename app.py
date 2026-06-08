@@ -7,7 +7,7 @@ from sklearn.model_selection import StratifiedKFold
 
 from models.mlp import MLP
 from models.mlp_bottleneck import MLPBottleneck
-from data.datasets import DATASETS, get_dataset, split_dataset, to_dataloader
+from data.datasets import DATASETS, MULTICLASS_CAPABLE, get_dataset, split_dataset, to_dataloader
 from training.trainer import Trainer, EarlyStopping
 from training.metrics import evaluate
 from utils.hooks import ActivationCapture
@@ -201,6 +201,15 @@ dataset_name = st.sidebar.selectbox(
         "⭐⭐⭐⭐ Spirals — le boss final"
     ),
 )
+n_classes = st.sidebar.slider(
+    "Nombre de classes (K)", 2, 5, 2,
+    disabled=dataset_name not in MULTICLASS_CAPABLE,
+    help=(
+        "Multi-classes disponible pour Blobs et Gaussian Quantiles. Les autres "
+        "datasets restent binaires (2 classes). K ≥ 3 active le mode multi-classes "
+        "(softmax + CrossEntropy + frontière multi-couleurs)."
+    ),
+)
 n_samples = st.sidebar.slider(
     "Nombre de points", 50, 1000, 200,
     help=(
@@ -227,17 +236,22 @@ weight_seed = st.sidebar.number_input(
 # ─────────────────────────────────────────────
 # Génération du dataset + split train / val / test
 # ─────────────────────────────────────────────
-X, y = get_dataset(dataset_name, n_samples=n_samples, noise=noise, seed=int(seed))
+X, y = get_dataset(dataset_name, n_samples=n_samples, noise=noise, seed=int(seed), n_classes=n_classes)
+
+# Nombre de classes RÉEL du dataset (robuste : certains datasets restent binaires).
+# K ≥ 3 → mode multi-classes (softmax + CrossEntropy) ; K = 2 → binaire (BCE).
+n_classes_eff = int(len(np.unique(y)))
+is_multiclass = n_classes_eff >= 3
+
 (X_train, y_train), (X_val, y_val), (X_test, y_test) = split_dataset(
     X, y,
     train_ratio=train_ratio,
     val_ratio=val_ratio,
     seed=int(seed),
 )
-train_loader = to_dataloader(X_train, y_train, batch_size=batch_size, shuffle=True)
-val_loader   = to_dataloader(X_val,   y_val,   batch_size=batch_size, shuffle=False)
-# test_loader sera utilisé pour les métriques finales (mercredi)
-test_loader  = to_dataloader(X_test,  y_test,  batch_size=batch_size, shuffle=False)
+train_loader = to_dataloader(X_train, y_train, batch_size=batch_size, shuffle=True, multiclass=is_multiclass)
+val_loader   = to_dataloader(X_val,   y_val,   batch_size=batch_size, shuffle=False, multiclass=is_multiclass)
+test_loader  = to_dataloader(X_test,  y_test,  batch_size=batch_size, shuffle=False, multiclass=is_multiclass)
 
 
 # ─────────────────────────────────────────────
@@ -249,6 +263,10 @@ def build_model():
     sidebar. Factorisé pour être réutilisable : flux principal d'entraînement
     ET évaluation k-fold (qui reconstruit un modèle frais à chaque fold).
     """
+    # Binaire → 1 sortie (logit) ; multi-classes → K sorties (logits bruts,
+    # softmax appliqué par CrossEntropyLoss).
+    out_dim = n_classes_eff if is_multiclass else 1
+
     if use_bottleneck:
         # ─── Encoder : symétrique OU en entonnoir ───
         if funnel_encoder:
@@ -273,7 +291,7 @@ def build_model():
             encoder_layers=encoder_layers,
             bottleneck_dim=bottleneck_dim,
             decoder_layers=decoder_layers,
-            output_dim=1,
+            output_dim=out_dim,
             activation=activation,
             use_batchnorm=use_batchnorm,
             dropout_rate=dropout_rate,
@@ -286,7 +304,7 @@ def build_model():
         return MLP(
             input_dim=2,
             hidden_layers=hidden_layers,
-            output_dim=1,
+            output_dim=out_dim,
             activation=activation,
             use_batchnorm=use_batchnorm,
             dropout_rate=dropout_rate,
@@ -335,48 +353,55 @@ def plot_decision_boundary(model, X, y, mode: str = "logits"):
     # Prédiction sur la grille
     model.eval()
     with torch.no_grad():
-        logits = model(torch.tensor(grid)).numpy().reshape(xx.shape)
+        out = model(torch.tensor(grid)).numpy()   # (N, C) : C=1 binaire, C=K multi
 
-    if mode == "probas":
-        Z = 1 / (1 + np.exp(-logits))   # sigmoid
-        boundary_level = 0.5
-        cbar_label = "P(classe 1)"
-        # Échelle fixe [0, 1]
-        vmin, vmax = 0.0, 1.0
-    else:
-        Z = logits
-        boundary_level = 0.0
-        cbar_label = "Logits (sortie brute)"
-        # Échelle symétrique autour de 0 pour bien visualiser
-        amax = max(abs(Z.min()), abs(Z.max()))
-        vmin, vmax = -amax, amax
-
-    # Plot
+    n_out = out.shape[1]
     fig, ax = plt.subplots(figsize=(7, 6))
+    colors = ["#2196F3", "#F44336", "#4CAF50", "#FF9800", "#9C27B0"]
 
-    contour = ax.contourf(xx, yy, Z, levels=50, cmap="RdYlBu_r", alpha=0.8, vmin=vmin, vmax=vmax)
-    plt.colorbar(contour, ax=ax, label=cbar_label)
+    if n_out == 1:
+        # ───── Cas binaire (comportement historique) ─────
+        logits = out.reshape(xx.shape)
+        if mode == "probas":
+            Z = 1 / (1 + np.exp(-logits))   # sigmoid
+            boundary_level, cbar_label = 0.5, "P(classe 1)"
+            vmin, vmax = 0.0, 1.0
+        else:
+            Z = logits
+            boundary_level, cbar_label = 0.0, "Logits (sortie brute)"
+            amax = max(abs(Z.min()), abs(Z.max()))
+            vmin, vmax = -amax, amax
+        contour = ax.contourf(xx, yy, Z, levels=50, cmap="RdYlBu_r", alpha=0.8, vmin=vmin, vmax=vmax)
+        plt.colorbar(contour, ax=ax, label=cbar_label)
+        ax.contour(xx, yy, Z, levels=[boundary_level], colors="black", linewidths=1.5)
+        classes = [0, 1]
+        title = f"Frontière de décision ({'logits' if mode == 'logits' else 'probabilités'})"
+    else:
+        # ───── Cas multi-classes : argmax → régions colorées ─────
+        from matplotlib.colors import ListedColormap
+        K = n_out
+        pred = out.argmax(axis=1).reshape(xx.shape)
+        cmap = ListedColormap(colors[:K])
+        ax.contourf(xx, yy, pred, levels=np.arange(-0.5, K, 1.0), cmap=cmap, alpha=0.35)
+        # Frontières entre régions (aux demi-entiers)
+        ax.contour(xx, yy, pred, levels=[i + 0.5 for i in range(K - 1)],
+                   colors="black", linewidths=1.0)
+        classes = list(range(K))
+        title = f"Frontière de décision — {K} classes (argmax)"
 
-    # Frontière de décision
-    ax.contour(xx, yy, Z, levels=[boundary_level], colors="black", linewidths=1.5)
-
-    # Points d'entraînement
-    colors = ["#2196F3", "#F44336"]
-    for cls in [0, 1]:
+    # Points (colorés par classe réelle)
+    for cls in classes:
         mask = y == cls
         ax.scatter(
             X[mask, 0], X[mask, 1],
-            c=colors[cls],
-            edgecolors="white",
-            linewidths=0.5,
-            s=40,
-            label=f"Classe {cls}",
-            zorder=3,
+            c=colors[cls % len(colors)],
+            edgecolors="white", linewidths=0.5, s=40,
+            label=f"Classe {cls}", zorder=3,
         )
 
     ax.set_xlabel("x₁")
     ax.set_ylabel("x₂")
-    ax.set_title(f"Frontière de décision ({'logits' if mode == 'logits' else 'probabilités'})")
+    ax.set_title(title)
     ax.legend()
     return fig
 
@@ -1096,7 +1121,7 @@ with col2:
 
     if st.button("Entraîner le réseau", type="primary"):
         optimizer = make_optimizer(model)
-        criterion = nn.BCEWithLogitsLoss()
+        criterion = nn.CrossEntropyLoss() if is_multiclass else nn.BCEWithLogitsLoss()
         trainer = Trainer(model=model, optimizer=optimizer, criterion=criterion)
 
         # Early stopping (optionnel)
@@ -1196,11 +1221,25 @@ with col2:
 
 
 # ─────────────────────────────────────────────
+# Mode multi-classes : note sur les sections en cours d'adaptation
+# ─────────────────────────────────────────────
+if is_multiclass and st.session_state.trainer is not None:
+    st.markdown("---")
+    st.info(
+        f"🎨 Mode **multi-classes** actif ({n_classes_eff} classes). La frontière "
+        "(régions colorées), les métriques (accuracy / precision / F1 macro) et les "
+        "heatmaps fonctionnent. L'espace latent, la généralisation train/test et la "
+        "matrice de confusion détaillée seront adaptés au multi-classes dans la semaine."
+    )
+
+
+# ─────────────────────────────────────────────
 # Visualisation de l'espace latent (si le modèle est un MLPBottleneck)
 # ─────────────────────────────────────────────
 if (
     st.session_state.trainer is not None
     and isinstance(st.session_state.trainer.model, MLPBottleneck)
+    and not is_multiclass
 ):
     st.markdown("---")
     st.subheader("Espace latent — comment le réseau a 'redessiné' les données")
@@ -1465,6 +1504,7 @@ if (
     st.session_state.train_report is not None
     and st.session_state.test_report is not None
     and st.session_state.test_X is not None
+    and not is_multiclass
 ):
     st.markdown("---")
     st.subheader("Généralisation — le réseau tient-il sur des données jamais vues ?")
@@ -1567,7 +1607,7 @@ with st.expander("Évaluation robuste — validation croisée (k-fold)"):
 # ─────────────────────────────────────────────
 # Évaluation sur le test set
 # ─────────────────────────────────────────────
-if st.session_state.test_report is not None:
+if st.session_state.test_report is not None and not is_multiclass:
     st.markdown("---")
     st.subheader("Évaluation sur le test set")
     st.caption(

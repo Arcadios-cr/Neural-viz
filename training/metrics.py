@@ -90,23 +90,30 @@ def evaluate(
     all_logits = []
     all_targets = []
     for X_batch, y_batch in loader:
-        logits = model(X_batch)
-        all_logits.append(logits)
+        all_logits.append(model(X_batch))
         all_targets.append(y_batch)
 
-    logits_tensor = torch.cat(all_logits, dim=0).squeeze(-1)
-    targets_tensor = torch.cat(all_targets, dim=0).squeeze(-1)
+    logits = torch.cat(all_logits, dim=0)        # (N, 1) binaire | (N, K) multi
+    targets = torch.cat(all_targets, dim=0)
+    y_true = targets.long().view(-1).cpu().numpy()
 
-    y_pred = (logits_tensor > threshold).long().cpu().numpy()
-    y_true = targets_tensor.long().cpu().numpy()
+    if logits.shape[1] > 1:
+        # ─── Multi-classes : prédiction = argmax, métriques moyennées (macro) ───
+        K = logits.shape[1]
+        y_pred = logits.argmax(dim=1).cpu().numpy()
+        average, labels = "macro", list(range(K))
+    else:
+        # ─── Binaire : seuil sur le logit unique ───
+        y_pred = (logits.view(-1) > threshold).long().cpu().numpy()
+        average, labels = "binary", [0, 1]
 
     # zero_division=0 : si une classe est absente des prédictions, on renvoie 0
     # au lieu de lever un warning
     return ClassificationReport(
         accuracy   = accuracy_score(y_true, y_pred),
-        precision  = precision_score(y_true, y_pred, zero_division=0),
-        recall     = recall_score(y_true, y_pred, zero_division=0),
-        f1         = f1_score(y_true, y_pred, zero_division=0),
-        confusion  = confusion_matrix(y_true, y_pred, labels=[0, 1]),
+        precision  = precision_score(y_true, y_pred, average=average, zero_division=0),
+        recall     = recall_score(y_true, y_pred, average=average, zero_division=0),
+        f1         = f1_score(y_true, y_pred, average=average, zero_division=0),
+        confusion  = confusion_matrix(y_true, y_pred, labels=labels),
         n_samples  = len(y_true),
     )

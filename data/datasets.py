@@ -75,15 +75,18 @@ def make_blobs(
     n_samples: int = 200,
     noise: float = 0.5,
     seed: int = 42,
+    n_classes: int = 2,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
-    Deux blobs gaussiens (sklearn make_blobs), chevauchement piloté par `noise`.
+    `n_classes` blobs gaussiens (sklearn make_blobs), chevauchement piloté par `noise`.
 
-    `cluster_std` augmente avec le bruit → les deux nuages se recouvrent de plus
-    en plus. Avantage : la même mécanique se généralise directement à K classes
-    (il suffira d'ajouter des centres) pour le futur module multi-classes.
+    Les centres sont répartis régulièrement sur un cercle (rayon 2), donc le
+    dataset se généralise naturellement à K classes. `cluster_std` augmente avec
+    le bruit → les nuages se recouvrent de plus en plus.
     """
-    centers = [[-1.5, 0.0], [1.5, 0.0]]
+    # Centres équirépartis sur un cercle → marche pour n'importe quel K.
+    angles = np.linspace(0, 2 * np.pi, n_classes, endpoint=False)
+    centers = np.stack([2.0 * np.cos(angles), 2.0 * np.sin(angles)], axis=1)
     cluster_std = 0.5 + 1.2 * noise
     X, y = sk_make_blobs(
         n_samples=n_samples, centers=centers,
@@ -124,17 +127,17 @@ def make_quantiles(
     n_samples: int = 200,
     noise: float = 0.2,
     seed: int = 42,
+    n_classes: int = 2,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
-    Classes en anneaux concentriques gaussiens (sklearn make_gaussian_quantiles).
+    `n_classes` anneaux concentriques gaussiens (sklearn make_gaussian_quantiles).
 
-    Le cœur du nuage est une classe, la couronne extérieure l'autre — séparation
-    par un cercle, mais avec un recouvrement gaussien naturel. `noise` ajoute du
-    bruit sur les coordonnées pour accentuer le chevauchement. Se généralise
-    aussi à K classes (anneaux successifs).
+    Chaque classe occupe un anneau (quantile) de la gaussienne : cœur = classe 0,
+    couronnes successives = classes suivantes. Frontières circulaires emboîtées.
+    `noise` ajoute du bruit sur les coordonnées pour accentuer le chevauchement.
     """
     X, y = sk_make_gaussian_quantiles(
-        n_samples=n_samples, n_features=2, n_classes=2, random_state=seed,
+        n_samples=n_samples, n_features=2, n_classes=n_classes, random_state=seed,
     )
     rng = np.random.default_rng(seed)
     X = X + rng.normal(scale=noise * 0.3, size=X.shape)
@@ -372,11 +375,16 @@ DATASETS = {
 }
 
 
+# Datasets qui savent générer plus de 2 classes (acceptent `n_classes`).
+MULTICLASS_CAPABLE = {"Blobs", "Gaussian Quantiles"}
+
+
 def get_dataset(
     name: str,
     n_samples: int = 200,
     noise: float = 0.2,
     seed: int = 42,
+    n_classes: int = 2,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Génère le dataset demandé par son nom.
@@ -391,9 +399,14 @@ def get_dataset(
         Niveau de bruit (interprétation spécifique à chaque dataset)
     seed : int
         Graine aléatoire pour la reproductibilité
+    n_classes : int
+        Nombre de classes — pris en compte uniquement par les datasets
+        multi-classes (Blobs, Gaussian Quantiles). Les autres restent binaires.
     """
     if name not in DATASETS:
         raise ValueError(f"Dataset inconnu : '{name}'. Choisir parmi : {list(DATASETS.keys())}")
+    if name in MULTICLASS_CAPABLE:
+        return DATASETS[name](n_samples=n_samples, noise=noise, seed=seed, n_classes=n_classes)
     return DATASETS[name](n_samples=n_samples, noise=noise, seed=seed)
 
 
@@ -405,12 +418,20 @@ def to_dataloader(
     y: np.ndarray,
     batch_size: int = 32,
     shuffle: bool = True,
+    multiclass: bool = False,
 ) -> DataLoader:
     """
     Convertit des arrays numpy en DataLoader PyTorch.
+
+    multiclass : bool
+        False (binaire) → cibles float de shape (n, 1) pour BCEWithLogitsLoss.
+        True (multi)    → cibles entières (long) de shape (n,) pour CrossEntropyLoss.
     """
-    X_tensor = torch.tensor(X)
-    y_tensor = torch.tensor(y).unsqueeze(1)  # shape (n, 1) pour BCEWithLogitsLoss
+    X_tensor = torch.tensor(X, dtype=torch.float32)
+    if multiclass:
+        y_tensor = torch.tensor(y, dtype=torch.long)              # (n,) pour CrossEntropyLoss
+    else:
+        y_tensor = torch.tensor(y, dtype=torch.float32).unsqueeze(1)  # (n, 1) pour BCEWithLogitsLoss
 
     dataset = TensorDataset(X_tensor, y_tensor)
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
