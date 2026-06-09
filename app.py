@@ -13,6 +13,12 @@ from training.metrics import evaluate
 from utils.hooks import ActivationCapture
 
 
+# Palette partagée : une classe = toujours la même couleur partout
+# (scatter des données, frontière de décision, et plus tard l'espace latent).
+# Le sélecteur K va de 2 à 5 classes → 5 couleurs suffisent.
+CLASS_COLORS = ["#2196F3", "#F44336", "#4CAF50", "#FF9800", "#9C27B0"]
+
+
 # ─────────────────────────────────────────────
 # Configuration de la page
 # ─────────────────────────────────────────────
@@ -109,8 +115,14 @@ head_neurons = st.sidebar.slider(
 st.sidebar.header("Visualisation")
 viz_mode = st.sidebar.radio(
     "Affichage de la sortie du réseau",
-    ["Logits (sortie brute)", "Probabilités (sigmoid)"],
+    ["Logits (sortie brute)", "Probabilités (sigmoid / softmax)"],
     index=0,
+    help=(
+        "Logits : sortie brute du réseau.\n"
+        "Probabilités : sigmoid en binaire ; en multi-classes, softmax → "
+        "l'opacité de la frontière indique la confiance du réseau (pâle = "
+        "le réseau hésite, saturé = il est sûr)."
+    ),
 )
 live_training = st.sidebar.checkbox("Entraînement en temps réel", value=True)
 track_gradients = st.sidebar.checkbox(
@@ -357,7 +369,7 @@ def plot_decision_boundary(model, X, y, mode: str = "logits"):
 
     n_out = out.shape[1]
     fig, ax = plt.subplots(figsize=(7, 6))
-    colors = ["#2196F3", "#F44336", "#4CAF50", "#FF9800", "#9C27B0"]
+    colors = CLASS_COLORS
 
     if n_out == 1:
         # ───── Cas binaire (comportement historique) ─────
@@ -377,17 +389,40 @@ def plot_decision_boundary(model, X, y, mode: str = "logits"):
         classes = [0, 1]
         title = f"Frontière de décision ({'logits' if mode == 'logits' else 'probabilités'})"
     else:
-        # ───── Cas multi-classes : argmax → régions colorées ─────
-        from matplotlib.colors import ListedColormap
+        # ───── Cas multi-classes ─────
+        from matplotlib.colors import ListedColormap, to_rgb
         K = n_out
-        pred = out.argmax(axis=1).reshape(xx.shape)
-        cmap = ListedColormap(colors[:K])
-        ax.contourf(xx, yy, pred, levels=np.arange(-0.5, K, 1.0), cmap=cmap, alpha=0.35)
-        # Frontières entre régions (aux demi-entiers)
+        pred_flat = out.argmax(axis=1)
+        pred = pred_flat.reshape(xx.shape)
+
+        if mode == "probas":
+            # Confiance = max(softmax). Couleur = classe argmax, OPACITÉ = certitude.
+            # Softmax stable numériquement (on retranche le max par ligne).
+            shifted = out - out.max(axis=1, keepdims=True)
+            soft = np.exp(shifted)
+            soft /= soft.sum(axis=1, keepdims=True)
+            conf = soft.max(axis=1)                       # ∈ [1/K, 1]
+            # Normalise : 1/K (équiprobable, le réseau hésite) → 0 ; 1 (certain) → 1
+            alpha = np.clip((conf - 1.0 / K) / (1.0 - 1.0 / K), 0.0, 1.0)
+            rgba = np.zeros((pred_flat.size, 4))
+            for k in range(K):
+                rgba[pred_flat == k, :3] = to_rgb(colors[k % len(colors)])
+            rgba[:, 3] = alpha * 0.85
+            img = rgba.reshape(xx.shape[0], xx.shape[1], 4)
+            # origin="lower" : yy croît de y_min (1ère ligne) vers y_max → cohérent
+            ax.imshow(img, extent=(x_min, x_max, y_min, y_max),
+                      origin="lower", aspect="auto", interpolation="nearest")
+            title = f"Frontière — {K} classes (softmax : opacité = confiance)"
+        else:
+            # Régions argmax « pleines » (toutes de même intensité)
+            cmap = ListedColormap(colors[:K])
+            ax.contourf(xx, yy, pred, levels=np.arange(-0.5, K, 1.0), cmap=cmap, alpha=0.35)
+            title = f"Frontière de décision — {K} classes (argmax)"
+
+        # Frontières entre régions (aux demi-entiers) — dans les deux modes
         ax.contour(xx, yy, pred, levels=[i + 0.5 for i in range(K - 1)],
                    colors="black", linewidths=1.0)
         classes = list(range(K))
-        title = f"Frontière de décision — {K} classes (argmax)"
 
     # Points (colorés par classe réelle)
     for cls in classes:
@@ -1091,25 +1126,41 @@ col1, col2 = st.columns(2)
 with col1:
     st.subheader("Données d'entraînement")
     fig_data, ax_data = plt.subplots(figsize=(7, 6))
-    colors = ["#2196F3", "#F44336"]
-    # Train : ronds pleins, Val : triangles, Test : croix
-    for cls in [0, 1]:
-        m_train = y_train == cls
-        m_val   = y_val   == cls
-        m_test  = y_test  == cls
-        ax_data.scatter(X_train[m_train, 0], X_train[m_train, 1],
-                        c=colors[cls], edgecolors="white", linewidths=0.4,
-                        s=40, marker="o", label=f"Train classe {cls}")
-        ax_data.scatter(X_val[m_val, 0], X_val[m_val, 1],
-                        c=colors[cls], edgecolors="black", linewidths=0.8,
-                        s=50, marker="^", label=f"Val classe {cls}")
-        ax_data.scatter(X_test[m_test, 0], X_test[m_test, 1],
-                        c=colors[cls], edgecolors="black", linewidths=0.8,
-                        s=55, marker="x", label=f"Test classe {cls}")
+    from matplotlib.lines import Line2D
+    # Couleur = classe (jusqu'à K=5) ; forme = échantillon.
+    # Train : ronds pleins, Val : triangles, Test : croix.
+    splits = [
+        ("Train", X_train, y_train, "o", "white", 0.4, 40),
+        ("Val",   X_val,   y_val,   "^", "black", 0.8, 50),
+        ("Test",  X_test,  y_test,  "x", "black", 0.8, 55),
+    ]
+    for _, Xs, ys, mk, edge, lw, s in splits:
+        for cls in range(n_classes_eff):
+            m = ys == cls
+            ax_data.scatter(Xs[m, 0], Xs[m, 1],
+                            c=CLASS_COLORS[cls % len(CLASS_COLORS)],
+                            edgecolors=edge, linewidths=lw, s=s, marker=mk)
     ax_data.set_xlabel("x₁")
     ax_data.set_ylabel("x₂")
     ax_data.set_title(f"Dataset — {dataset_name}  (train={len(y_train)}, val={len(y_val)}, test={len(y_test)})")
-    ax_data.legend(fontsize=7, loc="best")
+    # Légende factorisée : un bloc couleurs (les classes) + un bloc formes (les
+    # échantillons). Évite l'explosion en K×3 entrées illisibles quand K augmente.
+    class_handles = [
+        Line2D([0], [0], marker="o", linestyle="", markersize=7,
+               markerfacecolor=CLASS_COLORS[c % len(CLASS_COLORS)],
+               markeredgecolor="white", label=f"Classe {c}")
+        for c in range(n_classes_eff)
+    ]
+    split_handles = [
+        Line2D([0], [0], marker=mk, linestyle="", markersize=8,
+               color="dimgray", label=name)
+        for name, _, _, mk, _, _, _ in splits
+    ]
+    leg_classes = ax_data.legend(handles=class_handles, title="Classe",
+                                 fontsize=7, loc="upper left", framealpha=0.9)
+    ax_data.add_artist(leg_classes)
+    ax_data.legend(handles=split_handles, title="Échantillon",
+                   fontsize=7, loc="upper right", framealpha=0.9)
     st.pyplot(fig_data)
     plt.close(fig_data)
 
