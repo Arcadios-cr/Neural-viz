@@ -1278,9 +1278,9 @@ if is_multiclass and st.session_state.trainer is not None:
     st.markdown("---")
     st.info(
         f"🎨 Mode **multi-classes** actif ({n_classes_eff} classes). La frontière "
-        "(régions colorées), les métriques (accuracy / precision / F1 macro) et les "
-        "heatmaps fonctionnent. L'espace latent, la généralisation train/test et la "
-        "matrice de confusion détaillée seront adaptés au multi-classes dans la semaine."
+        "(régions colorées), les métriques (macro **et par classe**), la **matrice "
+        "de confusion K×K** et les heatmaps fonctionnent. L'espace latent et la "
+        "généralisation train/test seront adaptés au multi-classes d'ici vendredi."
     )
 
 
@@ -1658,7 +1658,7 @@ with st.expander("Évaluation robuste — validation croisée (k-fold)"):
 # ─────────────────────────────────────────────
 # Évaluation sur le test set
 # ─────────────────────────────────────────────
-if st.session_state.test_report is not None and not is_multiclass:
+if st.session_state.test_report is not None:
     st.markdown("---")
     st.subheader("Évaluation sur le test set")
     st.caption(
@@ -1668,55 +1668,121 @@ if st.session_state.test_report is not None and not is_multiclass:
     )
 
     report = st.session_state.test_report
+    cm = report.confusion
+    K = cm.shape[0]
+    multi_eval = K > 2          # affichage multi-classes (matrice K×K + table)
 
-    # ─── Métriques principales ───
+    # ─── Métriques principales (en multi : moyennes « macro » sur les K classes) ───
+    suffix = " (macro)" if multi_eval else ""
     cols = st.columns(4)
     with cols[0]:
         st.metric("Accuracy",  f"{report.accuracy  * 100:.2f} %")
     with cols[1]:
-        st.metric("Precision", f"{report.precision * 100:.2f} %")
+        st.metric("Precision" + suffix, f"{report.precision * 100:.2f} %")
     with cols[2]:
-        st.metric("Recall",    f"{report.recall    * 100:.2f} %")
+        st.metric("Recall" + suffix,    f"{report.recall    * 100:.2f} %")
     with cols[3]:
-        st.metric("F1-score",  f"{report.f1        * 100:.2f} %")
+        st.metric("F1-score" + suffix,  f"{report.f1        * 100:.2f} %")
 
     st.caption(f"Évalué sur **{report.n_samples} échantillons** du test set.")
+    if multi_eval:
+        st.caption(
+            "En multi-classes, precision / recall / F1 sont des moyennes **macro** : "
+            "on calcule la métrique pour chaque classe, puis on moyenne (chaque "
+            "classe pèse autant, quel que soit son effectif)."
+        )
 
-    # ─── Matrice de confusion ───
+    # ─── Matrice de confusion K×K ───
     cm_col, info_col = st.columns([2, 1])
 
     with cm_col:
         st.markdown("**Matrice de confusion**")
-        fig_cm, ax_cm = plt.subplots(figsize=(5, 4))
-        cm = report.confusion
+        fig_cm, ax_cm = plt.subplots(figsize=(0.7 * K + 3.5, 0.7 * K + 3))
         im = ax_cm.imshow(cm, cmap="Blues", aspect="equal")
         plt.colorbar(im, ax=ax_cm, fraction=0.046, pad=0.04)
 
-        # Annotations dans chaque case
-        for i in range(cm.shape[0]):
-            for j in range(cm.shape[1]):
+        # Annotations dans chaque case (police réduite si beaucoup de classes)
+        fs = 14 if K <= 3 else 11
+        for i in range(K):
+            for j in range(K):
                 val = cm[i, j]
                 # Texte blanc si la case est foncée (valeur élevée), sinon noir
                 color = "white" if val > cm.max() / 2 else "black"
                 ax_cm.text(j, i, str(val), ha="center", va="center",
-                           color=color, fontsize=14, fontweight="bold")
+                           color=color, fontsize=fs, fontweight="bold")
 
-        ax_cm.set_xticks([0, 1])
-        ax_cm.set_yticks([0, 1])
-        ax_cm.set_xticklabels(["Prédit 0", "Prédit 1"])
-        ax_cm.set_yticklabels(["Vrai 0", "Vrai 1"])
+        rot = 45 if K > 3 else 0
+        ax_cm.set_xticks(range(K))
+        ax_cm.set_yticks(range(K))
+        ax_cm.set_xticklabels([f"Prédit {k}" for k in range(K)],
+                              rotation=rot, ha="right" if rot else "center")
+        ax_cm.set_yticklabels([f"Vrai {k}" for k in range(K)])
         ax_cm.set_xlabel("Classe prédite")
         ax_cm.set_ylabel("Classe réelle")
         ax_cm.set_title("Matrice de confusion")
+        fig_cm.tight_layout()
         st.pyplot(fig_cm)
         plt.close(fig_cm)
 
     with info_col:
         st.markdown("**Lecture rapide**")
-        tn, fp, fn, tp = report.confusion.ravel()
-        st.markdown(
-            f"- **Vrais négatifs (TN)** : {tn} → classe 0 bien prédite\n"
-            f"- **Faux positifs (FP)** : {fp} → classe 0 prédite à tort en classe 1\n"
-            f"- **Faux négatifs (FN)** : {fn} → classe 1 ratée\n"
-            f"- **Vrais positifs (TP)** : {tp} → classe 1 bien prédite"
+        if not multi_eval:
+            # ─── Binaire : lecture TN / FP / FN / TP (comportement historique) ───
+            tn, fp, fn, tp = cm.ravel()
+            st.markdown(
+                f"- **Vrais négatifs (TN)** : {tn} → classe 0 bien prédite\n"
+                f"- **Faux positifs (FP)** : {fp} → classe 0 prédite à tort en classe 1\n"
+                f"- **Faux négatifs (FN)** : {fn} → classe 1 ratée\n"
+                f"- **Vrais positifs (TP)** : {tp} → classe 1 bien prédite"
+            )
+        else:
+            # ─── Multi : diagonale = correct, hors-diagonale = confusions ───
+            st.markdown(
+                "- **Diagonale** = points bien classés.\n"
+                "- **Hors-diagonale** = erreurs (ligne = vraie classe, "
+                "colonne = classe prédite)."
+            )
+            off = cm.copy()
+            np.fill_diagonal(off, 0)
+            if off.max() > 0:
+                i, j = np.unravel_index(int(off.argmax()), off.shape)
+                st.markdown(
+                    f"- Confusion la plus fréquente : **{int(off[i, j])} points** "
+                    f"de la classe **{i}** prédits en classe **{j}**."
+                )
+            else:
+                st.success("Aucune confusion : tout est sur la diagonale.")
+
+    # ─── Métriques par classe (multi-classes) ───
+    # Dérivées directement de la matrice K×K : la moyenne de chaque colonne
+    # redonne la valeur « macro » affichée en haut.
+    if multi_eval:
+        import pandas as pd
+
+        support = cm.sum(axis=1)          # nb de points réellement dans la classe (ligne)
+        col_sum = cm.sum(axis=0)          # nb de points prédits dans la classe (colonne)
+        diag = np.diag(cm).astype(float)
+        recall_k    = np.divide(diag, support, out=np.zeros(K), where=support > 0)
+        precision_k = np.divide(diag, col_sum, out=np.zeros(K), where=col_sum > 0)
+        denom = precision_k + recall_k
+        f1_k = np.divide(2 * precision_k * recall_k, denom,
+                         out=np.zeros(K), where=denom > 0)
+
+        st.markdown("**Métriques par classe**")
+        df_classes = pd.DataFrame(
+            {
+                "Précision": [f"{p * 100:.1f} %" for p in precision_k],
+                "Rappel":    [f"{r * 100:.1f} %" for r in recall_k],
+                "F1-score":  [f"{f * 100:.1f} %" for f in f1_k],
+                "Support":   [int(s) for s in support],
+            },
+            index=[f"Classe {k}" for k in range(K)],
+        )
+        st.table(df_classes)
+        st.caption(
+            "**Précision** d'une classe : parmi les points *prédits* dans cette "
+            "classe, combien sont corrects (lecture en colonne). **Rappel** : parmi "
+            "les points *réellement* de cette classe, combien sont retrouvés (lecture "
+            "en ligne). **Support** : nombre de points de test de la classe. La "
+            "moyenne de chaque colonne redonne les valeurs « macro » ci-dessus."
         )
