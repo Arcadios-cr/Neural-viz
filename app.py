@@ -986,34 +986,49 @@ def plot_generalization(model, X_train, y_train, X_test, y_test, mode="logits"):
 
     model.eval()
     with torch.no_grad():
-        logits = model(torch.tensor(grid)).numpy().reshape(xx.shape)
-        test_logits = model(torch.tensor(X_test.astype(np.float32))).numpy().squeeze(-1)
+        grid_out = model(torch.tensor(grid)).numpy()                       # (N, C)
+        test_out = model(torch.tensor(X_test.astype(np.float32))).numpy()  # (M, C)
 
-    # Prédiction sur le test (seuil 0 sur les logits = proba 0.5)
-    test_pred = (test_logits > 0).astype(int)
     y_test_int = y_test.astype(int)
+    n_out = grid_out.shape[1]
+    fig, ax = plt.subplots(figsize=(7, 6))
+    colors = CLASS_COLORS
+
+    if n_out == 1:
+        # ───── Binaire (historique) : carte de la sortie + frontière à 0 ─────
+        logits = grid_out.reshape(xx.shape)
+        test_pred = (test_out.squeeze(-1) > 0).astype(int)
+        if mode == "probas":
+            Z = 1 / (1 + np.exp(-logits))
+            boundary_level, cbar_label = 0.5, "P(classe 1)"
+            vmin, vmax = 0.0, 1.0
+        else:
+            Z = logits
+            boundary_level, cbar_label = 0.0, "Logits (sortie brute)"
+            amax = max(abs(Z.min()), abs(Z.max()))
+            vmin, vmax = -amax, amax
+        contour = ax.contourf(xx, yy, Z, levels=50, cmap="RdYlBu_r", alpha=0.8, vmin=vmin, vmax=vmax)
+        plt.colorbar(contour, ax=ax, label=cbar_label)
+        ax.contour(xx, yy, Z, levels=[boundary_level], colors="black", linewidths=1.5)
+        classes = [0, 1]
+    else:
+        # ───── Multi-classes : régions argmax + points de test en K couleurs ─────
+        from matplotlib.colors import ListedColormap
+        K = n_out
+        pred = grid_out.argmax(axis=1).reshape(xx.shape)
+        test_pred = test_out.argmax(axis=1)
+        ax.contourf(xx, yy, pred, levels=np.arange(-0.5, K, 1.0),
+                    cmap=ListedColormap(colors[:K]), alpha=0.35)
+        ax.contour(xx, yy, pred, levels=[i + 0.5 for i in range(K - 1)],
+                   colors="black", linewidths=1.0)
+        classes = list(range(K))
+
     misclassified = test_pred != y_test_int
 
-    if mode == "probas":
-        Z = 1 / (1 + np.exp(-logits))
-        boundary_level, cbar_label = 0.5, "P(classe 1)"
-        vmin, vmax = 0.0, 1.0
-    else:
-        Z = logits
-        boundary_level, cbar_label = 0.0, "Logits (sortie brute)"
-        amax = max(abs(Z.min()), abs(Z.max()))
-        vmin, vmax = -amax, amax
-
-    fig, ax = plt.subplots(figsize=(7, 6))
-    contour = ax.contourf(xx, yy, Z, levels=50, cmap="RdYlBu_r", alpha=0.8, vmin=vmin, vmax=vmax)
-    plt.colorbar(contour, ax=ax, label=cbar_label)
-    ax.contour(xx, yy, Z, levels=[boundary_level], colors="black", linewidths=1.5)
-
     # Points de test colorés par vraie classe
-    colors = ["#2196F3", "#F44336"]
-    for cls in [0, 1]:
+    for cls in classes:
         m = y_test_int == cls
-        ax.scatter(X_test[m, 0], X_test[m, 1], c=colors[cls],
+        ax.scatter(X_test[m, 0], X_test[m, 1], c=colors[cls % len(colors)],
                    edgecolors="white", linewidths=0.5, s=45,
                    label=f"Test classe {cls}", zorder=3)
 
@@ -1055,16 +1070,19 @@ def run_kfold(X, y, k, n_epochs, batch_size, progress=None):
         X_tr, y_tr = X[tr_idx], y[tr_idx]
         X_te, y_te = X[te_idx], y[te_idx]
 
-        loader_tr = to_dataloader(X_tr, y_tr, batch_size=batch_size, shuffle=True)
+        loader_tr = to_dataloader(X_tr, y_tr, batch_size=batch_size, shuffle=True,
+                                  multiclass=is_multiclass)
         torch.manual_seed(int(weight_seed))          # init reproductible
         m = build_model()
-        trainer_k = Trainer(m, make_optimizer(m), nn.BCEWithLogitsLoss())
+        criterion_k = nn.CrossEntropyLoss() if is_multiclass else nn.BCEWithLogitsLoss()
+        trainer_k = Trainer(m, make_optimizer(m), criterion_k)
         torch.manual_seed(int(weight_seed))          # shuffle + dropout
         trainer_k.train(
             loader_tr, n_epochs=n_epochs,
             save_snapshots=False, restore_best=False,
         )
-        rep = evaluate(m, to_dataloader(X_te, y_te, batch_size=batch_size, shuffle=False))
+        rep = evaluate(m, to_dataloader(X_te, y_te, batch_size=batch_size, shuffle=False,
+                                        multiclass=is_multiclass))
         accs.append(rep.accuracy)
         if progress is not None:
             progress.progress((i + 1) / k, text=f"Fold {i + 1}/{k} — accuracy {rep.accuracy * 100:.1f}%")
@@ -1278,10 +1296,9 @@ with col2:
 if is_multiclass and st.session_state.trainer is not None:
     st.markdown("---")
     st.info(
-        f"🎨 Mode **multi-classes** actif ({n_classes_eff} classes). La frontière "
-        "(régions colorées), les métriques (macro **et par classe**), la **matrice "
-        "de confusion K×K** et les heatmaps fonctionnent. L'espace latent et la "
-        "généralisation train/test seront adaptés au multi-classes d'ici vendredi."
+        f"🎨 Mode **multi-classes** actif ({n_classes_eff} classes). Toutes les "
+        "visualisations sont disponibles : frontière, métriques (macro **et par "
+        "classe**), matrice de confusion K×K, espace latent, généralisation et k-fold."
     )
 
 
@@ -1555,7 +1572,6 @@ if (
     st.session_state.train_report is not None
     and st.session_state.test_report is not None
     and st.session_state.test_X is not None
-    and not is_multiclass
 ):
     st.markdown("---")
     st.subheader("Généralisation — le réseau tient-il sur des données jamais vues ?")
