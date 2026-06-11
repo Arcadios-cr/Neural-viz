@@ -460,7 +460,8 @@ def plot_latent_space_1d(model: MLPBottleneck, X: np.ndarray, y: np.ndarray):
     with torch.no_grad():
         z = model.encode(torch.tensor(X, dtype=torch.float32)).numpy().ravel()
 
-    colors = ["#2196F3", "#F44336"]
+    colors = CLASS_COLORS
+    classes = np.unique(y).astype(int)
     rng = np.random.default_rng(0)
 
     fig, (ax_strip, ax_hist) = plt.subplots(
@@ -469,20 +470,20 @@ def plot_latent_space_1d(model: MLPBottleneck, X: np.ndarray, y: np.ndarray):
     )
 
     # ─── Strip plot : points sur l'axe z₁ + jitter vertical ───
-    for cls in [0, 1]:
+    for cls in classes:
         m = y == cls
         jitter = rng.uniform(-0.4, 0.4, size=int(m.sum()))
-        ax_strip.scatter(z[m], cls + jitter, c=colors[cls], s=25,
+        ax_strip.scatter(z[m], cls + jitter, c=colors[cls % len(colors)], s=25,
                          edgecolors="white", linewidths=0.4, alpha=0.8)
-    ax_strip.set_yticks([0, 1])
-    ax_strip.set_yticklabels(["Classe 0", "Classe 1"])
+    ax_strip.set_yticks(classes)
+    ax_strip.set_yticklabels([f"Classe {c}" for c in classes])
     ax_strip.set_title("Espace latent 1D — chaque point résumé en un seul nombre z₁")
 
     # ─── Histogrammes de z₁ par classe ───
     bins = np.linspace(z.min(), z.max(), 40)
-    for cls in [0, 1]:
+    for cls in classes:
         m = y == cls
-        ax_hist.hist(z[m], bins=bins, color=colors[cls], alpha=0.55,
+        ax_hist.hist(z[m], bins=bins, color=colors[cls % len(colors)], alpha=0.55,
                      label=f"Classe {cls}")
     ax_hist.set_xlabel("z₁ (unique neurone du bottleneck)")
     ax_hist.set_ylabel("Nombre de points")
@@ -505,12 +506,12 @@ def plot_latent_space(model: MLPBottleneck, X: np.ndarray, y: np.ndarray):
         Z = model.encode(torch.tensor(X, dtype=torch.float32)).numpy()
 
     fig, ax = plt.subplots(figsize=(7, 6))
-    colors = ["#2196F3", "#F44336"]
-    for cls in [0, 1]:
+    colors = CLASS_COLORS
+    for cls in np.unique(y).astype(int):
         mask = y == cls
         ax.scatter(
             Z[mask, 0], Z[mask, 1],
-            c=colors[cls],
+            c=colors[cls % len(colors)],
             edgecolors="white",
             linewidths=0.5,
             s=40,
@@ -544,9 +545,9 @@ def plot_latent_space_3d(model: MLPBottleneck, X: np.ndarray, y: np.ndarray):
         Z = model.encode(torch.tensor(X, dtype=torch.float32)).numpy()
     # Z a shape (n, 3)
 
-    colors_pts = ["#2196F3", "#F44336"]
+    colors_pts = CLASS_COLORS
     fig = go.Figure()
-    for cls in [0, 1]:
+    for cls in np.unique(y).astype(int):
         mask = y == cls
         fig.add_trace(go.Scatter3d(
             x=Z[mask, 0],
@@ -556,7 +557,7 @@ def plot_latent_space_3d(model: MLPBottleneck, X: np.ndarray, y: np.ndarray):
             name=f"Classe {cls}",
             marker=dict(
                 size=4,
-                color=colors_pts[cls],
+                color=colors_pts[cls % len(colors_pts)],
                 line=dict(color="white", width=0.5),
                 opacity=0.85,
             ),
@@ -629,7 +630,7 @@ def plot_activations_grid(
         activations = cap.get_activations(grid_t)
 
     figures = []
-    colors_pts = ["#2196F3", "#F44336"]
+    colors_pts = CLASS_COLORS
 
     for layer_name, act_tensor in activations.items():
         # act_tensor : shape (grid_resolution², n_neurones_de_la_couche)
@@ -664,9 +665,9 @@ def plot_activations_grid(
                 aspect="auto",
             )
             # Superposition discrète des points d'entraînement
-            for cls in [0, 1]:
+            for cls in np.unique(y).astype(int):
                 m = y == cls
-                ax.scatter(X[m, 0], X[m, 1], c=colors_pts[cls],
+                ax.scatter(X[m, 0], X[m, 1], c=colors_pts[cls % len(colors_pts)],
                            s=4, alpha=0.7, edgecolors="none")
             ax.set_title(f"#{neuron_idx}", fontsize=9)
             ax.set_xticks([])
@@ -800,10 +801,10 @@ def plot_first_layer_lines(model: nn.Module, X: np.ndarray, y: np.ndarray):
     fig, ax = plt.subplots(figsize=(7, 6))
 
     # ─── Scatter des données en arrière-plan ───
-    colors_pts = ["#2196F3", "#F44336"]
-    for cls in [0, 1]:
+    colors_pts = CLASS_COLORS
+    for cls in np.unique(y).astype(int):
         m = y == cls
-        ax.scatter(X[m, 0], X[m, 1], c=colors_pts[cls],
+        ax.scatter(X[m, 0], X[m, 1], c=colors_pts[cls % len(colors_pts)],
                    edgecolors="white", linewidths=0.4, s=30,
                    alpha=0.5, label=f"Classe {cls}", zorder=1)
 
@@ -1290,7 +1291,6 @@ if is_multiclass and st.session_state.trainer is not None:
 if (
     st.session_state.trainer is not None
     and isinstance(st.session_state.trainer.model, MLPBottleneck)
-    and not is_multiclass
 ):
     st.markdown("---")
     st.subheader("Espace latent — comment le réseau a 'redessiné' les données")
@@ -1313,10 +1313,10 @@ if (
     with col_in:
         st.markdown("**Espace d'entrée** (donné au réseau)")
         fig_in, ax_in = plt.subplots(figsize=(6, 5))
-        colors = ["#2196F3", "#F44336"]
-        for cls in [0, 1]:
+        colors = CLASS_COLORS
+        for cls in range(n_classes_eff):
             m = by == cls
-            ax_in.scatter(bX[m, 0], bX[m, 1], c=colors[cls],
+            ax_in.scatter(bX[m, 0], bX[m, 1], c=colors[cls % len(colors)],
                           edgecolors="white", linewidths=0.4, s=40,
                           label=f"Classe {cls}")
         ax_in.set_xlabel("x₁")
