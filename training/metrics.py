@@ -1,9 +1,11 @@
 """
-Module d'évaluation : métriques de classification binaire calculées sur
-un dataset de test (jamais vu pendant l'entraînement).
+Module d'évaluation : métriques de classification (binaire ET multi-classes)
+calculées sur un dataset de test (jamais vu pendant l'entraînement).
 
-On s'appuie sur sklearn.metrics qui est déjà une dépendance du projet
-(utilisée par data/datasets.py).
+Le mode est détecté automatiquement d'après la forme des logits du modèle :
+1 sortie → binaire (seuil) ; K sorties → multi-classes (argmax, moyennes
+« macro », matrice K×K). On s'appuie sur sklearn.metrics, déjà une dépendance
+du projet (utilisée par data/datasets.py).
 """
 
 from dataclasses import dataclass
@@ -30,10 +32,11 @@ class ClassificationReport:
     Champs
     ------
     accuracy    : taux global de bonnes prédictions
-    precision   : VP / (VP + FP) — fiabilité d'une prédiction positive
-    recall      : VP / (VP + FN) — capacité à retrouver les positifs
-    f1          : moyenne harmonique de precision et recall
-    confusion   : matrice 2x2 (lignes = vraies classes, colonnes = prédictions)
+    precision   : binaire = VP/(VP+FP) ; multi = moyenne macro des précisions
+    recall      : binaire = VP/(VP+FN) ; multi = moyenne macro des rappels
+    f1          : moyenne harmonique de precision et recall (macro en multi)
+    confusion   : matrice K×K (lignes = vraies classes, colonnes = prédictions ;
+                  2×2 en binaire)
     n_samples   : nombre total d'échantillons évalués
     """
     accuracy:   float
@@ -64,12 +67,13 @@ def evaluate(
     threshold: float = 0.0,
 ) -> ClassificationReport:
     """
-    Évalue un modèle PyTorch de classification binaire sur un DataLoader.
+    Évalue un modèle PyTorch de classification sur un DataLoader.
 
-    Le modèle est supposé renvoyer un logit unique par échantillon
-    (sortie de la dernière couche linéaire, AVANT sigmoid).
-    La prédiction est faite via :    pred = 1 si logit > threshold, sinon 0
-    (par défaut threshold=0, ce qui correspond à proba=0.5 après sigmoid).
+    Détecte automatiquement le mode d'après la sortie du modèle :
+      - 1 logit par échantillon  → binaire : pred = 1 si logit > threshold
+        (threshold=0 ⇔ proba 0.5 après sigmoid) ;
+      - K logits par échantillon → multi-classes : pred = argmax, métriques
+        moyennées « macro » et matrice de confusion K×K.
 
     Paramètres
     ----------
@@ -78,7 +82,7 @@ def evaluate(
     loader : DataLoader
         Le DataLoader sur lequel évaluer (typiquement le test_loader).
     threshold : float
-        Seuil de décision sur les logits. Par défaut 0.0
+        Seuil de décision sur les logits (binaire uniquement). Par défaut 0.0
         (équivalent à p(classe 1) > 0.5).
 
     Retourne

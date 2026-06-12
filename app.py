@@ -1151,7 +1151,8 @@ with col1:
     splits = [
         ("Train", X_train, y_train, "o", "white", 0.4, 40),
         ("Val",   X_val,   y_val,   "^", "black", 0.8, 50),
-        ("Test",  X_test,  y_test,  "x", "black", 0.8, 55),
+        # "x" est un marker non rempli → edgecolor=None (évite un warning mpl)
+        ("Test",  X_test,  y_test,  "x", None,    0.8, 55),
     ]
     for _, Xs, ys, mk, edge, lw, s in splits:
         for cls in range(n_classes_eff):
