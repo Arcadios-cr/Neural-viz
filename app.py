@@ -7,7 +7,9 @@ from sklearn.model_selection import StratifiedKFold
 
 from models.mlp import MLP
 from models.mlp_bottleneck import MLPBottleneck
+from models.gcn import GCN
 from data.datasets import DATASETS, MULTICLASS_CAPABLE, get_dataset, split_dataset, to_dataloader
+from data.graphs import build_knn, knn_edges
 from training.trainer import Trainer, EarlyStopping
 from training.metrics import evaluate
 from utils.hooks import ActivationCapture
@@ -30,6 +32,31 @@ st.title("Visualisation d'un réseau de neurones MLP")
 # Sidebar — paramètres
 # ─────────────────────────────────────────────
 st.sidebar.header("Architecture du réseau")
+
+model_type = st.sidebar.radio(
+    "Type de modèle",
+    ["MLP (perceptron)", "GCN (convolution de graphe)"],
+    help=(
+        "MLP : perceptron classique (chaque point traité indépendamment).\n"
+        "GCN : convolution sur le graphe des k plus proches voisins du nuage de "
+        "points — chaque point agrège l'information de ses voisins."
+    ),
+)
+is_gcn = model_type.startswith("GCN")
+knn_k = st.sidebar.slider(
+    "GCN — voisins k", 2, 15, 6,
+    disabled=not is_gcn,
+    help="Nombre de voisins reliés à chaque point dans le graphe k-NN (taille du voisinage de convolution).",
+)
+gcn_layers_n = st.sidebar.slider(
+    "GCN — couches de graphe", 1, 4, 2,
+    disabled=not is_gcn,
+    help=(
+        "Nombre de couches de convolution de graphe. Avec 1 seule, le GCN a souvent "
+        "du mal à apprendre (champ réceptif d'un seul saut) ; 2 suffisent en général. "
+        "Trop de couches → sur-lissage (oversmoothing)."
+    ),
+)
 
 n_hidden_layers = st.sidebar.slider(
     "Nombre de couches cachées", 1, 8, 1,
@@ -333,10 +360,16 @@ def make_optimizer(m):
 # On fixe le générateur aléatoire juste avant de créer le modèle :
 # l'initialisation des poids devient reproductible.
 torch.manual_seed(int(weight_seed))
-model = build_model()
+model = build_model()   # MLP (toujours construit ; utilisé uniquement en mode MLP)
 
 st.sidebar.markdown("---")
-st.sidebar.markdown(f"**Modèle :** `{model}`")
+if is_gcn:
+    st.sidebar.markdown(
+        f"**Modèle :** GCN — {gcn_layers_n} couche(s) de graphe × {neurons_per_layer}, "
+        f"k = {knn_k}"
+    )
+else:
+    st.sidebar.markdown(f"**Modèle :** `{model}`")
 
 
 # ─────────────────────────────────────────────
@@ -1120,6 +1153,60 @@ def plot_kfold(accs):
 
 
 # ─────────────────────────────────────────────
+# GCN — modèle, masques et visualisations (mode « convolution de graphe »)
+# ─────────────────────────────────────────────
+def build_gcn_model():
+    """Construit un GCN selon la sidebar (n_hidden_layers = couches de graphe)."""
+    out_dim = n_classes_eff if is_multiclass else 1
+    gcn_layers = [neurons_per_layer] * gcn_layers_n
+    head_layers = [max(neurons_per_layer // 2, 4)]
+    return GCN(input_dim=2, gcn_layers=gcn_layers, head_layers=head_layers,
+               output_dim=out_dim, activation=activation)
+
+
+def gcn_masks(n):
+    """Indices train/val/test sur les n nœuds (mêmes ratios que la sidebar)."""
+    rng = np.random.default_rng(int(seed))
+    perm = rng.permutation(n)
+    n_tr, n_val = int(train_ratio * n), int(val_ratio * n)
+    return perm[:n_tr], perm[n_tr:n_tr + n_val], perm[n_tr + n_val:]
+
+
+def plot_gcn_graph(X, y, edges):
+    """Dessine le graphe k-NN : arêtes grises + nœuds colorés par vraie classe."""
+    from matplotlib.collections import LineCollection
+    fig, ax = plt.subplots(figsize=(7, 6))
+    segs = [[(X[i, 0], X[i, 1]), (X[j, 0], X[j, 1])] for (i, j) in edges]
+    ax.add_collection(LineCollection(segs, colors="lightgray", linewidths=0.4, zorder=1))
+    for c in range(n_classes_eff):
+        m = y == c
+        ax.scatter(X[m, 0], X[m, 1], c=CLASS_COLORS[c % len(CLASS_COLORS)], s=28,
+                   edgecolors="white", linewidths=0.4, zorder=2, label=f"Classe {c}")
+    ax.set_title(f"Graphe k-NN (k={knn_k}) — {len(edges)} arêtes")
+    ax.set_xlabel("x₁"); ax.set_ylabel("x₂"); ax.legend(fontsize=8)
+    return fig
+
+
+def plot_gcn_pred(X, y, pred, te_idx):
+    """Nœuds colorés par classe PRÉDITE ; points de test mal classés entourés de noir."""
+    fig, ax = plt.subplots(figsize=(7, 6))
+    for c in range(n_classes_eff):
+        m = pred == c
+        ax.scatter(X[m, 0], X[m, 1], c=CLASS_COLORS[c % len(CLASS_COLORS)], s=30,
+                   edgecolors="white", linewidths=0.4, zorder=2)
+    wrong = np.zeros(len(y), dtype=bool)
+    wrong[te_idx] = pred[te_idx] != y[te_idx]
+    if wrong.any():
+        ax.scatter(X[wrong, 0], X[wrong, 1], s=150, facecolors="none",
+                   edgecolors="black", linewidths=1.6, zorder=3,
+                   label=f"test mal classé ({int(wrong.sum())})")
+        ax.legend(fontsize=8)
+    ax.set_title("Prédictions du GCN (test mal classés entourés)")
+    ax.set_xlabel("x₁"); ax.set_ylabel("x₂")
+    return fig
+
+
+# ─────────────────────────────────────────────
 # Initialisation de st.session_state
 # ─────────────────────────────────────────────
 # st.session_state persiste entre les reruns de Streamlit (à chaque interaction
@@ -1135,6 +1222,7 @@ if "trainer" not in st.session_state:
     st.session_state.train_report = None      # métriques sur le train (pour l'écart train/test)
     st.session_state.test_X = None            # points de test (pour la viz de généralisation)
     st.session_state.test_y = None
+    st.session_state.gcn = None               # résultat du dernier entraînement GCN
 
 
 # ─────────────────────────────────────────────
@@ -1190,7 +1278,7 @@ with col2:
     boundary_placeholder = st.empty()
     status_placeholder = st.empty()
 
-    if st.button("Entraîner le réseau", type="primary"):
+    if (not is_gcn) and st.button("Entraîner le réseau", type="primary"):
         optimizer = make_optimizer(model)
         criterion = nn.CrossEntropyLoss() if is_multiclass else nn.BCEWithLogitsLoss()
         trainer = Trainer(model=model, optimizer=optimizer, criterion=criterion)
@@ -1285,10 +1373,98 @@ with col2:
         st.session_state.test_y = y_test
     else:
         # S'il n'y a pas eu d'entraînement encore, on affiche le message d'invite
-        if st.session_state.trainer is None:
+        if is_gcn:
+            boundary_placeholder.info(
+                "**Mode GCN** : l'entraînement et la visualisation du graphe se font "
+                "dans la section ci-dessous ⬇️"
+            )
+        elif st.session_state.trainer is None:
             boundary_placeholder.info(
                 "Configure les paramètres dans la sidebar, puis clique sur **Entraîner le réseau**."
             )
+
+
+# ─────────────────────────────────────────────
+# Mode GCN : graphe k-NN, entraînement transductif, prédictions
+# ─────────────────────────────────────────────
+if is_gcn:
+    st.markdown("---")
+    st.subheader("GCN — convolution sur le graphe des k plus proches voisins")
+    st.caption(
+        "On construit un graphe k-NN sur le nuage de points, on applique des couches "
+        "de convolution de graphe (chaque nœud agrège ses voisins), puis une tête MLP "
+        "classe chaque nœud. Entraînement **transductif** : un seul graphe sur tous les "
+        "points, perte calculée sur les nœuds d'entraînement (les nœuds de test "
+        "participent à la propagation, mais leur label n'est pas vu)."
+    )
+
+    A_hat, A_bin = build_knn(X, k=knn_k)
+    edges = knn_edges(A_bin)
+
+    gcol1, gcol2 = st.columns(2)
+    with gcol1:
+        st.markdown("**Graphe des voisins**")
+        st.pyplot(plot_gcn_graph(X, y, edges))
+        plt.close("all")
+
+    with gcol2:
+        st.markdown("**Entraînement & prédictions**")
+        if st.button("Entraîner le GCN", type="primary"):
+            n = len(y)
+            tr_idx, val_idx, te_idx = gcn_masks(n)
+            m_tr = torch.tensor(np.isin(np.arange(n), tr_idx))
+            m_val = torch.tensor(np.isin(np.arange(n), val_idx))
+            Xt = torch.tensor(X, dtype=torch.float32)
+            yt = (torch.tensor(y, dtype=torch.long) if is_multiclass
+                  else torch.tensor(y, dtype=torch.float32).view(-1, 1))
+
+            torch.manual_seed(int(weight_seed))
+            gcn = build_gcn_model()
+            opt = torch.optim.Adam(gcn.parameters(), lr=learning_rate)
+            crit = nn.CrossEntropyLoss() if is_multiclass else nn.BCEWithLogitsLoss()
+
+            hist = {"train": [], "validation": []}
+            prog = st.progress(0.0, text="Entraînement du GCN…")
+            torch.manual_seed(int(weight_seed))
+            for epoch in range(n_epochs):
+                gcn.train()
+                opt.zero_grad()
+                out = gcn(Xt, A_hat)
+                loss = crit(out[m_tr], yt[m_tr])
+                loss.backward()
+                opt.step()
+                gcn.eval()
+                with torch.no_grad():
+                    vloss = crit(gcn(Xt, A_hat)[m_val], yt[m_val]).item()
+                hist["train"].append(loss.item())
+                hist["validation"].append(vloss)
+                prog.progress((epoch + 1) / n_epochs)
+            prog.empty()
+
+            gcn.eval()
+            with torch.no_grad():
+                out = gcn(Xt, A_hat).numpy()
+            pred = out.argmax(1) if is_multiclass else (out[:, 0] > 0).astype(int)
+            st.session_state.gcn = dict(
+                X=X, y=y, edges=edges, pred=pred, te_idx=te_idx, tr_idx=tr_idx,
+                acc_test=float((pred[te_idx] == y[te_idx]).mean()),
+                acc_train=float((pred[tr_idx] == y[tr_idx]).mean()),
+                hist=hist,
+            )
+
+        g = st.session_state.gcn
+        if g is not None:
+            m1, m2 = st.columns(2)
+            m1.metric("Accuracy test", f"{g['acc_test'] * 100:.1f} %")
+            m2.metric("Accuracy train", f"{g['acc_train'] * 100:.1f} %")
+            st.pyplot(plot_gcn_pred(g["X"], g["y"], g["pred"], g["te_idx"]))
+            plt.close("all")
+            st.line_chart(g["hist"])
+        else:
+            st.info("Clique sur **Entraîner le GCN**.")
+
+    # En mode GCN, on s'arrête là : les sections MLP ci-dessous ne s'appliquent pas.
+    st.stop()
 
 
 # ─────────────────────────────────────────────
