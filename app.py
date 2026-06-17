@@ -1206,6 +1206,76 @@ def plot_gcn_pred(X, y, pred, te_idx):
     return fig
 
 
+def _grid(X, res=60):
+    """Grille régulière couvrant le nuage de points (pour les régions de décision)."""
+    x_min, x_max = X[:, 0].min() - 0.5, X[:, 0].max() + 0.5
+    y_min, y_max = X[:, 1].min() - 0.5, X[:, 1].max() + 0.5
+    xx, yy = np.meshgrid(np.linspace(x_min, x_max, res), np.linspace(y_min, y_max, res))
+    return xx, yy, np.c_[xx.ravel(), yy.ravel()].astype(np.float32)
+
+
+def gcn_decision_regions(gcn_model, X, A_hat, k, res=60):
+    """
+    Régions de décision d'un GCN. Comme un GCN classe des NŒUDS (pas des points
+    arbitraires), on insère la grille dans le graphe : chaque point de la grille
+    est relié à ses k plus proches voisins du dataset (arêtes dirigées grille →
+    dataset, donc les nœuds du dataset gardent EXACTEMENT leur représentation
+    d'entraînement). On lit ensuite la prédiction du GCN sur les nœuds-grille.
+    """
+    from sklearn.neighbors import NearestNeighbors
+    xx, yy, G = _grid(X, res)
+    n, g = len(X), len(G)
+    idx = NearestNeighbors(n_neighbors=k).fit(X).kneighbors(G, return_distance=False)
+    N = n + g
+    A = torch.zeros((N, N), dtype=torch.float32)
+    A[:n, :n] = A_hat                                       # bloc dataset = Â d'entraînement
+    w = 1.0 / (k + 1)
+    rows = torch.tensor(np.repeat(np.arange(g), k) + n)
+    cols = torch.tensor(idx.ravel())
+    A[rows, cols] = w                                       # grille → voisins dataset
+    diag = torch.arange(n, N)
+    A[diag, diag] = w                                       # self-loops des nœuds-grille
+    Xaug = torch.tensor(np.vstack([X, G]), dtype=torch.float32)
+    gcn_model.eval()
+    with torch.no_grad():
+        out = gcn_model(Xaug, A).numpy()[n:]
+    pred = out.argmax(1) if out.shape[1] > 1 else (out[:, 0] > 0).astype(int)
+    return xx, yy, pred.reshape(xx.shape)
+
+
+def mlp_decision_regions(mlp_model, X, res=60):
+    """Régions de décision d'un MLP (il classe chaque point de la grille directement)."""
+    xx, yy, G = _grid(X, res)
+    mlp_model.eval()
+    with torch.no_grad():
+        out = mlp_model(torch.tensor(G)).numpy()
+    pred = out.argmax(1) if out.shape[1] > 1 else (out[:, 0] > 0).astype(int)
+    return xx, yy, pred.reshape(xx.shape)
+
+
+def plot_regions_compare(X, y, reg_gcn, reg_mlp, acc_gcn, acc_mlp):
+    """Régions de décision GCN (gauche) vs MLP (droite), points superposés."""
+    from matplotlib.colors import ListedColormap
+    K = max(n_classes_eff, 2)
+    cmap = ListedColormap(CLASS_COLORS[:K])
+    fig, axes = plt.subplots(1, 2, figsize=(13, 6))
+    for ax, (xx, yy, R), title, acc in [
+        (axes[0], reg_gcn, "GCN", acc_gcn),
+        (axes[1], reg_mlp, "MLP", acc_mlp),
+    ]:
+        ax.contourf(xx, yy, R, levels=np.arange(-0.5, K, 1.0), cmap=cmap, alpha=0.35)
+        if K > 1:
+            ax.contour(xx, yy, R, levels=[i + 0.5 for i in range(K - 1)],
+                       colors="black", linewidths=1.0)
+        for c in range(n_classes_eff):
+            m = y == c
+            ax.scatter(X[m, 0], X[m, 1], c=CLASS_COLORS[c % len(CLASS_COLORS)], s=18,
+                       edgecolors="white", linewidths=0.3, zorder=3)
+        ax.set_title(f"{title} — test acc {acc * 100:.1f}%")
+        ax.set_xlabel("x₁"); ax.set_ylabel("x₂")
+    return fig
+
+
 # ─────────────────────────────────────────────
 # Initialisation de st.session_state
 # ─────────────────────────────────────────────
@@ -1449,7 +1519,7 @@ if is_gcn:
                 X=X, y=y, edges=edges, pred=pred, te_idx=te_idx, tr_idx=tr_idx,
                 acc_test=float((pred[te_idx] == y[te_idx]).mean()),
                 acc_train=float((pred[tr_idx] == y[tr_idx]).mean()),
-                hist=hist,
+                hist=hist, model=gcn, A_hat=A_hat, k=knn_k,
             )
 
         g = st.session_state.gcn
@@ -1462,6 +1532,48 @@ if is_gcn:
             st.line_chart(g["hist"])
         else:
             st.info("Clique sur **Entraîner le GCN**.")
+
+    # ─── Régions de décision : GCN vs MLP (même découpage train/test) ───
+    g = st.session_state.gcn
+    if g is not None and g.get("model") is not None:
+        st.markdown("---")
+        st.markdown("**Régions de décision — GCN vs MLP**")
+        st.caption(
+            "Pour colorer le plan, on insère une grille de points dans le graphe "
+            "(chaque point relié à ses k plus proches voisins du dataset, sans modifier "
+            "les nœuds existants). On compare à un MLP entraîné sur les mêmes points."
+        )
+        if st.checkbox("Calculer les régions de décision (un peu lent)"):
+            with st.spinner("Calcul des régions…"):
+                reg_gcn = gcn_decision_regions(g["model"], g["X"], g["A_hat"], g["k"])
+                out_dim = n_classes_eff if is_multiclass else 1
+                torch.manual_seed(int(weight_seed))
+                mlp_cmp = MLP(2, [neurons_per_layer, neurons_per_layer], out_dim,
+                              activation=activation)
+                opt = torch.optim.Adam(mlp_cmp.parameters(), lr=learning_rate)
+                crit = nn.CrossEntropyLoss() if is_multiclass else nn.BCEWithLogitsLoss()
+                Xtr = torch.tensor(g["X"][g["tr_idx"]], dtype=torch.float32)
+                ytr = (torch.tensor(g["y"][g["tr_idx"]], dtype=torch.long) if is_multiclass
+                       else torch.tensor(g["y"][g["tr_idx"]], dtype=torch.float32).view(-1, 1))
+                torch.manual_seed(int(weight_seed))
+                for _ in range(n_epochs):
+                    mlp_cmp.train()
+                    opt.zero_grad()
+                    crit(mlp_cmp(Xtr), ytr).backward()
+                    opt.step()
+                reg_mlp = mlp_decision_regions(mlp_cmp, g["X"])
+                mlp_cmp.eval()
+                with torch.no_grad():
+                    mout = mlp_cmp(torch.tensor(g["X"], dtype=torch.float32)).numpy()
+                mpred = mout.argmax(1) if is_multiclass else (mout[:, 0] > 0).astype(int)
+                acc_mlp = float((mpred[g["te_idx"]] == g["y"][g["te_idx"]]).mean())
+            st.pyplot(plot_regions_compare(g["X"], g["y"], reg_gcn, reg_mlp,
+                                           g["acc_test"], acc_mlp))
+            plt.close("all")
+            st.caption(
+                f"Graphe à k = {g['k']}. Change **k** dans la sidebar puis ré-entraîne "
+                "le GCN pour voir l'effet de la taille du voisinage sur la frontière."
+            )
 
     # En mode GCN, on s'arrête là : les sections MLP ci-dessous ne s'appliquent pas.
     st.stop()
