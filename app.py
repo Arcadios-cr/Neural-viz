@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 import matplotlib.pyplot as plt
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import StratifiedKFold, StratifiedShuffleSplit
 
 from models.mlp import MLP
 from models.mlp_bottleneck import MLPBottleneck
@@ -1182,6 +1182,58 @@ def plot_kfold(accs):
     return fig
 
 
+def run_repeated_holdout(X, y, n_runs, n_epochs, batch_size, test_ratio, progress=None):
+    """
+    Repeated holdout (Monte-Carlo cross-validation) : re-tire N fois un découpage
+    train/test **stratifié**, ré-entraîne un modèle neuf et mesure l'accuracy à
+    chaque fois. L'init des poids est FIXE → la dispersion observée vient
+    uniquement du DÉCOUPAGE (quels points tombent en train vs en test).
+
+    Renvoie (accs_test, accs_train) : deux tableaux de N accuracies.
+    """
+    test_size = min(max(test_ratio, 0.1), 0.5)       # garde-fou sur la part de test
+    sss = StratifiedShuffleSplit(n_splits=n_runs, test_size=test_size, random_state=0)
+    accs_te, accs_tr = [], []
+    for i, (tr_idx, te_idx) in enumerate(sss.split(X, y)):
+        X_tr, y_tr = X[tr_idx], y[tr_idx]
+        X_te, y_te = X[te_idx], y[te_idx]
+
+        loader_tr = to_dataloader(X_tr, y_tr, batch_size=batch_size, shuffle=True,
+                                  multiclass=is_multiclass)
+        torch.manual_seed(int(weight_seed))          # init FIXE → isole la variance du découpage
+        m = build_model()
+        criterion = nn.CrossEntropyLoss() if is_multiclass else nn.BCEWithLogitsLoss()
+        trainer_h = Trainer(m, make_optimizer(m), criterion)
+        torch.manual_seed(int(weight_seed))
+        trainer_h.train(loader_tr, n_epochs=n_epochs, save_snapshots=False, restore_best=False)
+
+        accs_te.append(evaluate(m, to_dataloader(X_te, y_te, batch_size=batch_size,
+                                                 shuffle=False, multiclass=is_multiclass)).accuracy)
+        accs_tr.append(evaluate(m, to_dataloader(X_tr, y_tr, batch_size=batch_size,
+                                                 shuffle=False, multiclass=is_multiclass)).accuracy)
+        if progress is not None:
+            progress.progress((i + 1) / n_runs, text=f"Découpage {i + 1}/{n_runs}")
+    return np.array(accs_te), np.array(accs_tr)
+
+
+def plot_holdout_distribution(accs):
+    """Histogramme de l'accuracy test sur N découpages + moyenne et bande ± écart-type."""
+    mean, std = accs.mean(), accs.std()
+    fig, ax = plt.subplots(figsize=(7, 4))
+    ax.hist(accs * 100, bins=min(15, max(5, len(accs) // 2)),
+            color="#2196F3", alpha=0.75, edgecolor="white", zorder=3)
+    ax.axvspan((mean - std) * 100, (mean + std) * 100, color="gray", alpha=0.15,
+               zorder=1, label=f"± écart-type ({std * 100:.1f} pts)")
+    ax.axvline(mean * 100, color="black", linestyle="--", linewidth=1.5,
+               zorder=2, label=f"moyenne {mean * 100:.1f} %")
+    ax.set_xlabel("Accuracy test (%)")
+    ax.set_ylabel("Nombre de découpages")
+    ax.set_title(f"Distribution de l'accuracy test sur {len(accs)} découpages")
+    ax.legend(fontsize=9)
+    fig.tight_layout()
+    return fig
+
+
 # ─────────────────────────────────────────────
 # GCN — modèle, masques et visualisations (mode « convolution de graphe »)
 # ─────────────────────────────────────────────
@@ -1988,6 +2040,56 @@ with st.expander("Évaluation robuste — validation croisée (k-fold)"):
         fig_kf = plot_kfold(accs)
         st.pyplot(fig_kf)
         plt.close(fig_kf)
+
+
+# ─────────────────────────────────────────────
+# Stabilité de la généralisation : repeated holdout (variance du découpage)
+# ─────────────────────────────────────────────
+st.markdown("---")
+with st.expander("Stabilité de l'estimation — répéter le découpage (repeated holdout)"):
+    st.caption(
+        "Un **seul** découpage train/test peut être chanceux ou malchanceux. On "
+        "re-tire ici le découpage **N fois** (stratifié), on ré-entraîne, et on "
+        "regarde la **distribution** de l'accuracy de test. L'init des poids est "
+        "fixe : la dispersion observée vient donc **uniquement du découpage**. "
+        "💡 Augmente le **nombre de points** (sidebar) puis relance → l'écart-type "
+        "diminue (la variance d'une proportion ∝ 1/√n_test). ⚠️ Entraîne N modèles."
+    )
+    n_holdout = st.slider("Nombre de découpages (N)", 5, 50, 20)
+    if st.button("Évaluer la stabilité"):
+        prog = st.progress(0.0, text="Démarrage…")
+        with st.spinner("Repeated holdout en cours…"):
+            te, tr = run_repeated_holdout(X, y, n_holdout, n_epochs, batch_size, test_ratio, progress=prog)
+        prog.empty()
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Accuracy test (moyenne)", f"{te.mean() * 100:.1f} %")
+        c2.metric("Écart-type (instabilité)", f"± {te.std() * 100:.1f} pts")
+        c3.metric("Écart train → test (moyen)", f"{(tr.mean() - te.mean()) * 100:+.1f} pts")
+
+        spread = te.std() * 100
+        if spread < 1.5:
+            st.success(
+                f"✅ Estimation **stable** : un seul découpage donne ≈ ±{spread:.1f} pts. "
+                "La généralisation ne dépend quasiment pas du tirage."
+            )
+        elif spread < 4:
+            st.info(
+                f"ℹ️ Instabilité modérée : un seul split varie de ≈ ±{spread:.1f} pts. "
+                "Moyenner plusieurs découpages (ou ajouter des points) fiabilise le chiffre."
+            )
+        else:
+            st.warning(
+                f"⚠️ Estimation **instable** : ±{spread:.1f} pts d'un découpage à l'autre → "
+                "un seul split est peu fiable ici. Pistes : plus de points, ou moyenner N découpages."
+            )
+
+        st.caption(
+            f"Accuracy test par découpage : {', '.join(f'{a * 100:.0f}%' for a in te)}."
+        )
+        fig_h = plot_holdout_distribution(te)
+        st.pyplot(fig_h)
+        plt.close(fig_h)
 
 
 # ─────────────────────────────────────────────
