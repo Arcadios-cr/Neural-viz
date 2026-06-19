@@ -480,14 +480,15 @@ def plot_latent_space_1d(model: MLPBottleneck, X: np.ndarray, y: np.ndarray):
     neurone) appris par le réseau.
 
     Chaque point d'entrée est résumé en UN seul nombre z₁. On affiche :
-      - en haut : un strip plot (chaque point placé sur l'axe z₁, avec un
-        léger jitter vertical pour les distinguer), coloré par classe ;
-      - en bas : l'histogramme de z₁ pour chaque classe.
+      - en haut : un strip plot (chaque point placé sur l'axe z₁, coloré par classe) ;
+      - en bas : les histogrammes de z₁ par classe, posés sur les RÉGIONS DE
+        DÉCISION de la tête (fond pâle = classe prédite le long de z₁), avec un
+        score de SÉPARABILITÉ (quel % de points la tête classe bien à partir de z₁).
 
-    Lecture : si les deux classes occupent des plages de z₁ **séparées**, le
-    réseau a réussi à les ranger sur une seule dimension (le problème tient
-    sur une ligne). Si elles se **chevauchent** en z₁, une seule dimension ne
-    suffit pas — il faut un bottleneck plus large.
+    Lecture : si les classes occupent des plages de z₁ **séparées** et tombent
+    chacune sur le bon fond, le réseau a réussi à ranger le problème sur une
+    seule dimension (séparabilité ≈ 100 %). Si elles se **chevauchent**, une
+    seule dimension ne suffit pas — il faut un bottleneck plus large.
     """
     model.eval()
     with torch.no_grad():
@@ -497,8 +498,26 @@ def plot_latent_space_1d(model: MLPBottleneck, X: np.ndarray, y: np.ndarray):
     classes = np.unique(y).astype(int)
     rng = np.random.default_rng(0)
 
+    # ─── Décision de la TÊTE le long de l'axe z₁ ───
+    # Le bottleneck est 1D : on balaie z₁ et on demande à la tête (décodeur) ce
+    # qu'elle prédit. Cela donne (a) les « régions de décision » sur la ligne et
+    # (b) la séparabilité RÉELLEMENT atteinte par le réseau sur cette seule
+    # dimension = quel % de points la tête classe correctement à partir de z₁.
+    pad = 0.05 * (z.max() - z.min() + 1e-9)
+    grid = np.linspace(z.min() - pad, z.max() + pad, 400).astype(np.float32)
+    with torch.no_grad():
+        out_grid = model.decoder(torch.tensor(grid).view(-1, 1)).numpy()
+        out_pts = model.decoder(torch.tensor(z, dtype=torch.float32).view(-1, 1)).numpy()
+    if out_grid.shape[1] > 1:                       # multi-classes : argmax
+        region = out_grid.argmax(1)
+        pts_pred = out_pts.argmax(1)
+    else:                                           # binaire : seuil à 0
+        region = (out_grid[:, 0] > 0).astype(int)
+        pts_pred = (out_pts[:, 0] > 0).astype(int)
+    sep = (pts_pred == y).mean()
+
     fig, (ax_strip, ax_hist) = plt.subplots(
-        2, 1, figsize=(8, 5), sharex=True,
+        2, 1, figsize=(8, 5.5), sharex=True,
         gridspec_kw={"height_ratios": [1, 2]},
     )
 
@@ -510,17 +529,28 @@ def plot_latent_space_1d(model: MLPBottleneck, X: np.ndarray, y: np.ndarray):
                          edgecolors="white", linewidths=0.4, alpha=0.8)
     ax_strip.set_yticks(classes)
     ax_strip.set_yticklabels([f"Classe {c}" for c in classes])
-    ax_strip.set_title("Espace latent 1D — chaque point résumé en un seul nombre z₁")
+    ax_strip.set_title(f"Espace latent 1D — séparabilité sur z₁ : {sep * 100:.0f} %")
 
-    # ─── Histogrammes de z₁ par classe ───
-    bins = np.linspace(z.min(), z.max(), 40)
+    # ─── Régions de décision de la tête (fond coloré pâle) + histogrammes ───
+    bounds = np.where(np.diff(region) != 0)[0]
+    edges = np.concatenate(([grid[0]], (grid[bounds] + grid[bounds + 1]) / 2, [grid[-1]]))
+    seg_cls = np.concatenate(([region[0]], region[bounds + 1]))
+    for k in range(len(seg_cls)):
+        ax_hist.axvspan(edges[k], edges[k + 1],
+                        color=colors[int(seg_cls[k]) % len(colors)], alpha=0.12, zorder=0)
+    for b in bounds:                                # frontières de décision sur z₁
+        ax_hist.axvline((grid[b] + grid[b + 1]) / 2, color="black", ls="--", lw=1, alpha=0.6)
+
+    bins = np.linspace(grid[0], grid[-1], 40)
     for cls in classes:
         m = y == cls
-        ax_hist.hist(z[m], bins=bins, color=colors[cls % len(colors)], alpha=0.55,
-                     label=f"Classe {cls}")
+        ax_hist.hist(z[m], bins=bins, color=colors[cls % len(colors)], alpha=0.6,
+                     label=f"Classe {cls}", zorder=2)
     ax_hist.set_xlabel("z₁ (unique neurone du bottleneck)")
     ax_hist.set_ylabel("Nombre de points")
-    ax_hist.legend()
+    ax_hist.legend(title="vraie classe", fontsize=8)
+    ax_hist.text(0.01, 0.97, "fond pâle = classe prédite par la tête le long de z₁",
+                 transform=ax_hist.transAxes, fontsize=7, va="top", color="dimgray")
     fig.tight_layout()
     return fig
 
