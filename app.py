@@ -57,6 +57,17 @@ gcn_layers_n = st.sidebar.slider(
         "Trop de couches → sur-lissage (oversmoothing)."
     ),
 )
+gcn_aggregation = st.sidebar.selectbox(
+    "GCN — agrégation des voisins", ["moyenne (GCN)", "max (GraphSAGE)"],
+    disabled=not is_gcn,
+    help=(
+        "Comment un nœud combine ses voisins. **Moyenne** (Kipf) : moyenne pondérée "
+        "(lisse). **Max** (esprit du pooling de GraphSAGE) : on garde, dimension par "
+        "dimension, la plus forte réponse parmi les voisins (détecteur de motif, "
+        "moins sensible à la densité du voisinage)."
+    ),
+)
+gcn_agg = "max" if gcn_aggregation.startswith("max") else "mean"
 
 n_hidden_layers = st.sidebar.slider(
     "Nombre de couches cachées", 1, 8, 1,
@@ -1235,6 +1246,63 @@ def plot_holdout_distribution(accs):
 
 
 # ─────────────────────────────────────────────
+# Métriques de classification — helpers partagés (MLP et GCN)
+# ─────────────────────────────────────────────
+def plot_confusion_matrix(cm, title="Matrice de confusion"):
+    """Matrice de confusion K×K (lignes = vraie classe, colonnes = prédiction)."""
+    K = cm.shape[0]
+    fig, ax = plt.subplots(figsize=(0.7 * K + 3.5, 0.7 * K + 3))
+    im = ax.imshow(cm, cmap="Blues", aspect="equal")
+    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+    # Annotations dans chaque case (texte blanc si case foncée, sinon noir)
+    fs = 14 if K <= 3 else 11
+    for i in range(K):
+        for j in range(K):
+            val = cm[i, j]
+            ax.text(j, i, str(val), ha="center", va="center",
+                    color="white" if val > cm.max() / 2 else "black",
+                    fontsize=fs, fontweight="bold")
+
+    rot = 45 if K > 3 else 0
+    ax.set_xticks(range(K)); ax.set_yticks(range(K))
+    ax.set_xticklabels([f"Prédit {k}" for k in range(K)],
+                       rotation=rot, ha="right" if rot else "center")
+    ax.set_yticklabels([f"Vrai {k}" for k in range(K)])
+    ax.set_xlabel("Classe prédite"); ax.set_ylabel("Classe réelle")
+    ax.set_title(title)
+    fig.tight_layout()
+    return fig
+
+
+def per_class_table(cm):
+    """
+    Précision / rappel / F1 / support PAR CLASSE, dérivés de la matrice K×K.
+    Rappel = diag/somme(ligne), précision = diag/somme(colonne). La moyenne de
+    chaque colonne redonne la valeur « macro ».
+    """
+    import pandas as pd
+    K = cm.shape[0]
+    support = cm.sum(axis=1)              # nb de points réellement dans la classe (ligne)
+    col_sum = cm.sum(axis=0)              # nb de points prédits dans la classe (colonne)
+    diag = np.diag(cm).astype(float)
+    recall_k    = np.divide(diag, support, out=np.zeros(K), where=support > 0)
+    precision_k = np.divide(diag, col_sum, out=np.zeros(K), where=col_sum > 0)
+    denom = precision_k + recall_k
+    f1_k = np.divide(2 * precision_k * recall_k, denom,
+                     out=np.zeros(K), where=denom > 0)
+    return pd.DataFrame(
+        {
+            "Précision": [f"{p * 100:.1f} %" for p in precision_k],
+            "Rappel":    [f"{r * 100:.1f} %" for r in recall_k],
+            "F1-score":  [f"{f * 100:.1f} %" for f in f1_k],
+            "Support":   [int(s) for s in support],
+        },
+        index=[f"Classe {k}" for k in range(K)],
+    )
+
+
+# ─────────────────────────────────────────────
 # GCN — modèle, masques et visualisations (mode « convolution de graphe »)
 # ─────────────────────────────────────────────
 def build_gcn_model():
@@ -1243,7 +1311,7 @@ def build_gcn_model():
     gcn_layers = [neurons_per_layer] * gcn_layers_n
     head_layers = [max(neurons_per_layer // 2, 4)]
     return GCN(input_dim=2, gcn_layers=gcn_layers, head_layers=head_layers,
-               output_dim=out_dim, activation=activation)
+               output_dim=out_dim, activation=activation, aggregation=gcn_agg)
 
 
 def gcn_masks(n):
@@ -1614,6 +1682,33 @@ if is_gcn:
             st.line_chart(g["hist"])
         else:
             st.info("Clique sur **Entraîner le GCN**.")
+
+    # ─── Précision / rappel par classe (sur les nœuds de test) ───
+    g = st.session_state.gcn
+    if g is not None:
+        st.markdown("---")
+        st.markdown("**Précision / rappel par classe (nœuds de test)**")
+        st.caption(
+            "Mêmes métriques que pour le MLP, calculées sur les nœuds de **test** du "
+            "graphe (jamais supervisés). Matrice de confusion (lignes = vraie classe, "
+            "colonnes = prédiction) et précision / rappel / F1 par classe."
+        )
+        from sklearn.metrics import confusion_matrix
+        yt_te, yp_te = g["y"][g["te_idx"]], g["pred"][g["te_idx"]]
+        K_g = int(max(g["y"].max(), g["pred"].max())) + 1     # robuste au binaire (K=2)
+        cm_g = confusion_matrix(yt_te, yp_te, labels=list(range(K_g)))
+
+        cc1, cc2 = st.columns([1, 1])
+        with cc1:
+            st.pyplot(plot_confusion_matrix(cm_g, "Confusion — nœuds de test (GCN)"))
+            plt.close("all")
+        with cc2:
+            st.table(per_class_table(cm_g))
+        st.caption(
+            "**Précision** d'une classe : parmi les nœuds *prédits* dans cette classe, "
+            "combien sont corrects. **Rappel** : parmi les nœuds *réellement* de cette "
+            "classe, combien sont retrouvés. **Support** : nb de nœuds de test de la classe."
+        )
 
     # ─── Régions de décision : GCN vs MLP (même découpage train/test) ───
     g = st.session_state.gcn
@@ -2134,30 +2229,7 @@ if st.session_state.test_report is not None:
 
     with cm_col:
         st.markdown("**Matrice de confusion**")
-        fig_cm, ax_cm = plt.subplots(figsize=(0.7 * K + 3.5, 0.7 * K + 3))
-        im = ax_cm.imshow(cm, cmap="Blues", aspect="equal")
-        plt.colorbar(im, ax=ax_cm, fraction=0.046, pad=0.04)
-
-        # Annotations dans chaque case (police réduite si beaucoup de classes)
-        fs = 14 if K <= 3 else 11
-        for i in range(K):
-            for j in range(K):
-                val = cm[i, j]
-                # Texte blanc si la case est foncée (valeur élevée), sinon noir
-                color = "white" if val > cm.max() / 2 else "black"
-                ax_cm.text(j, i, str(val), ha="center", va="center",
-                           color=color, fontsize=fs, fontweight="bold")
-
-        rot = 45 if K > 3 else 0
-        ax_cm.set_xticks(range(K))
-        ax_cm.set_yticks(range(K))
-        ax_cm.set_xticklabels([f"Prédit {k}" for k in range(K)],
-                              rotation=rot, ha="right" if rot else "center")
-        ax_cm.set_yticklabels([f"Vrai {k}" for k in range(K)])
-        ax_cm.set_xlabel("Classe prédite")
-        ax_cm.set_ylabel("Classe réelle")
-        ax_cm.set_title("Matrice de confusion")
-        fig_cm.tight_layout()
+        fig_cm = plot_confusion_matrix(cm)
         st.pyplot(fig_cm)
         plt.close(fig_cm)
 
@@ -2194,28 +2266,8 @@ if st.session_state.test_report is not None:
     # Dérivées directement de la matrice K×K : la moyenne de chaque colonne
     # redonne la valeur « macro » affichée en haut.
     if multi_eval:
-        import pandas as pd
-
-        support = cm.sum(axis=1)          # nb de points réellement dans la classe (ligne)
-        col_sum = cm.sum(axis=0)          # nb de points prédits dans la classe (colonne)
-        diag = np.diag(cm).astype(float)
-        recall_k    = np.divide(diag, support, out=np.zeros(K), where=support > 0)
-        precision_k = np.divide(diag, col_sum, out=np.zeros(K), where=col_sum > 0)
-        denom = precision_k + recall_k
-        f1_k = np.divide(2 * precision_k * recall_k, denom,
-                         out=np.zeros(K), where=denom > 0)
-
         st.markdown("**Métriques par classe**")
-        df_classes = pd.DataFrame(
-            {
-                "Précision": [f"{p * 100:.1f} %" for p in precision_k],
-                "Rappel":    [f"{r * 100:.1f} %" for r in recall_k],
-                "F1-score":  [f"{f * 100:.1f} %" for f in f1_k],
-                "Support":   [int(s) for s in support],
-            },
-            index=[f"Classe {k}" for k in range(K)],
-        )
-        st.table(df_classes)
+        st.table(per_class_table(cm))
         st.caption(
             "**Précision** d'une classe : parmi les points *prédits* dans cette "
             "classe, combien sont corrects (lecture en colonne). **Rappel** : parmi "
