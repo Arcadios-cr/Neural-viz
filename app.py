@@ -94,7 +94,14 @@ first_layer_neurons = st.sidebar.slider(
     help="Nombre de droites de séparation apprises directement sur l'entrée.",
 )
 activation = st.sidebar.selectbox("Fonction d'activation", ["relu", "tanh", "sigmoid"])
-use_batchnorm = st.sidebar.checkbox("Utiliser BatchNorm", value=False)
+use_batchnorm = st.sidebar.checkbox(
+    "Utiliser BatchNorm", value=False,
+    help=(
+        "Normalise les activations couche par couche (entraînement plus stable, "
+        "échelles homogènes). S'applique au MLP comme au GCN : en mode GCN, une "
+        "BatchNorm est insérée après chaque couche de convolution de graphe."
+    ),
+)
 dropout_rate = st.sidebar.slider(
     "Dropout (régularisation)",
     0.0, 0.7, 0.0, step=0.05,
@@ -1311,7 +1318,8 @@ def build_gcn_model():
     gcn_layers = [neurons_per_layer] * gcn_layers_n
     head_layers = [max(neurons_per_layer // 2, 4)]
     return GCN(input_dim=2, gcn_layers=gcn_layers, head_layers=head_layers,
-               output_dim=out_dim, activation=activation, aggregation=gcn_agg)
+               output_dim=out_dim, activation=activation, aggregation=gcn_agg,
+               use_batchnorm=use_batchnorm)
 
 
 def gcn_masks(n):
@@ -1353,6 +1361,47 @@ def plot_gcn_pred(X, y, pred, te_idx):
         ax.legend(fontsize=8)
     ax.set_title("Prédictions du GCN (test mal classés entourés)")
     ax.set_xlabel("x₁"); ax.set_ylabel("x₂")
+    return fig
+
+
+def plot_gcn_latent(model, X, y, A_hat):
+    """
+    Espace latent du GCN : les embeddings de nœuds renvoyés par ``encode()``
+    (après les couches de convolution, AVANT la tête). Affichage côte à côte de
+    l'espace d'entrée (coordonnées brutes) et de l'espace latent, ce dernier
+    projeté en 2D par PCA si sa dimension dépasse 2. Un score de séparabilité
+    (silhouette, de -1 à 1) résume à quel point les classes y sont distinctes.
+    """
+    from sklearn.metrics import silhouette_score
+    model.eval()
+    with torch.no_grad():
+        Z = model.encode(torch.tensor(X, dtype=torch.float32), A_hat).numpy()
+
+    if Z.shape[1] == 2:
+        emb, xl, yl = Z, "z₁", "z₂"
+    else:
+        from sklearn.decomposition import PCA
+        pca = PCA(n_components=2, random_state=0)
+        emb = pca.fit_transform(Z)
+        v = pca.explained_variance_ratio_ * 100
+        xl, yl = f"PC1 ({v[0]:.0f} %)", f"PC2 ({v[1]:.0f} %)"
+
+    # Séparabilité mesurée sur la VRAIE dimension latente (pas la projection)
+    sil = silhouette_score(Z, y) if len(np.unique(y)) > 1 else float("nan")
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 6))
+    for ax, P, title, axx, axy in [
+        (axes[0], X, "Espace d'entrée (coordonnées brutes)", "x₁", "x₂"),
+        (axes[1], emb, f"Espace latent du GCN (dim {Z.shape[1]} → 2D) — "
+                       f"séparabilité {sil:.2f}", xl, yl),
+    ]:
+        for c in range(n_classes_eff):
+            m = y == c
+            ax.scatter(P[m, 0], P[m, 1], c=CLASS_COLORS[c % len(CLASS_COLORS)],
+                       s=26, edgecolors="white", linewidths=0.4, label=f"Classe {c}")
+        ax.set_title(title); ax.set_xlabel(axx); ax.set_ylabel(axy)
+    axes[1].legend(fontsize=8)
+    fig.tight_layout()
     return fig
 
 
@@ -1709,6 +1758,21 @@ if is_gcn:
             "combien sont corrects. **Rappel** : parmi les nœuds *réellement* de cette "
             "classe, combien sont retrouvés. **Support** : nb de nœuds de test de la classe."
         )
+
+    # ─── Espace latent du GCN (embeddings de nœuds via encode()) ───
+    g = st.session_state.gcn
+    if g is not None and g.get("model") is not None:
+        st.markdown("---")
+        st.markdown("**Espace latent du GCN — ce que « voient » les couches de convolution**")
+        st.caption(
+            "À gauche, l'espace d'entrée (coordonnées brutes). À droite, la "
+            "représentation des nœuds renvoyée par `encode()` (après les couches de "
+            "graphe, avant la tête), projetée en 2D par PCA si sa dimension dépasse 2. "
+            "Plus les classes y sont séparées, plus la tête a un travail facile — c'est "
+            "ce que résume le **score de séparabilité** (silhouette, de -1 à 1)."
+        )
+        st.pyplot(plot_gcn_latent(g["model"], g["X"], g["y"], g["A_hat"]))
+        plt.close("all")
 
     # ─── Régions de décision : GCN vs MLP (même découpage train/test) ───
     g = st.session_state.gcn
