@@ -70,20 +70,29 @@ class GCN(nn.Module):
     head_layers : tailles des couches de la tête MLP (ex. [16]).
     output_dim  : 1 (binaire) ou K (multi-classes).
     aggregation : ``"mean"`` (Kipf, défaut) ou ``"max"`` (pooling GraphSAGE).
+    use_batchnorm : si True, une BatchNorm est insérée après chaque couche de
+        graphe (avant l'activation). En transductif (un seul graphe), elle
+        normalise chaque feature sur l'ensemble des nœuds → entraînement plus
+        stable, échelles homogènes entre couches.
 
     forward(X, A_hat) renvoie les logits par nœud, shape (n, output_dim).
     """
 
     def __init__(self, input_dim=2, gcn_layers=(16, 16), head_layers=(16,),
-                 output_dim=1, activation="relu", aggregation="mean"):
+                 output_dim=1, activation="relu", aggregation="mean",
+                 use_batchnorm=False):
         super().__init__()
         act = _ACTIVATIONS[activation]
 
-        # ─── Couches de convolution de graphe ───
+        # ─── Couches de convolution de graphe (+ BatchNorm optionnelle) ───
+        # Une BatchNorm (ou Identity si désactivée) par couche, appliquée entre
+        # l'agrégation et l'activation — cf. encode().
         self.gcns = nn.ModuleList()
+        self.bns = nn.ModuleList()
         d = input_dim
         for h in gcn_layers:
             self.gcns.append(GCNLayer(d, h, aggregation=aggregation))
+            self.bns.append(nn.BatchNorm1d(h) if use_batchnorm else nn.Identity())
             d = h
         self.act = act()
 
@@ -102,6 +111,7 @@ class GCN(nn.Module):
     def encode(self, X: torch.Tensor, A_hat: torch.Tensor) -> torch.Tensor:
         """Représentation des nœuds après les couches de graphe (avant la tête)."""
         H = X
-        for g in self.gcns:
-            H = self.act(g(H, A_hat))
+        for g, bn in zip(self.gcns, self.bns):
+            # convolution de graphe → BatchNorm (sur tous les nœuds) → activation
+            H = self.act(bn(g(H, A_hat)))
         return H
