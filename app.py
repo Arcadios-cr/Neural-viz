@@ -35,39 +35,52 @@ st.sidebar.header("Architecture du réseau")
 
 model_type = st.sidebar.radio(
     "Type de modèle",
-    ["MLP (perceptron)", "GCN (convolution de graphe)"],
+    ["MLP (perceptron)", "Réseau de graphe (GCN / GraphSAGE / GAT)"],
     help=(
         "MLP : perceptron classique (chaque point traité indépendamment).\n"
-        "GCN : convolution sur le graphe des k plus proches voisins du nuage de "
-        "points — chaque point agrège l'information de ses voisins."
+        "Réseau de graphe : construit un graphe k-NN et agrège les voisins. Selon "
+        "l'**agrégation** choisie ci-dessous, il devient un GCN (moyenne), un "
+        "GraphSAGE (max) ou un GAT (attention)."
     ),
 )
-is_gcn = model_type.startswith("GCN")
+is_graph = model_type.startswith("Réseau")
 knn_k = st.sidebar.slider(
-    "GCN — voisins k", 2, 15, 6,
-    disabled=not is_gcn,
-    help="Nombre de voisins reliés à chaque point dans le graphe k-NN (taille du voisinage de convolution).",
+    "Graphe — voisins k", 2, 15, 6,
+    disabled=not is_graph,
+    help="Nombre de voisins reliés à chaque point dans le graphe k-NN (taille du voisinage).",
 )
 gcn_layers_n = st.sidebar.slider(
-    "GCN — couches de graphe", 1, 4, 2,
-    disabled=not is_gcn,
+    "Graphe — couches (profondeur)", 1, 4, 2,
+    disabled=not is_graph,
     help=(
-        "Nombre de couches de convolution de graphe. Avec 1 seule, le GCN a souvent "
-        "du mal à apprendre (champ réceptif d'un seul saut) ; 2 suffisent en général. "
-        "Trop de couches → sur-lissage (oversmoothing)."
+        "Nombre de couches de graphe (répétitions de l'agrégation). Avec 1 seule, le "
+        "champ réceptif est d'un seul saut ; 2 suffisent en général. Trop de couches "
+        "→ sur-lissage (oversmoothing)."
     ),
 )
 gcn_aggregation = st.sidebar.selectbox(
-    "GCN — agrégation des voisins", ["moyenne (GCN)", "max (GraphSAGE)"],
-    disabled=not is_gcn,
+    "Agrégation des voisins", ["moyenne (GCN)", "max (GraphSAGE)", "attention (GAT)"],
+    disabled=not is_graph,
     help=(
-        "Comment un nœud combine ses voisins. **Moyenne** (Kipf) : moyenne pondérée "
-        "(lisse). **Max** (esprit du pooling de GraphSAGE) : on garde, dimension par "
-        "dimension, la plus forte réponse parmi les voisins (détecteur de motif, "
-        "moins sensible à la densité du voisinage)."
+        "Comment un nœud combine ses voisins — c'est ce qui distingue les "
+        "architectures. **Moyenne** (Kipf/GCN) : poids fixes, tous les voisins "
+        "égaux. **Max** (GraphSAGE) : on garde la plus forte réponse (détecteur de "
+        "motif). **Attention** (GAT) : le nœud APPREND combien chaque voisin compte "
+        "(multi-têtes) — il « se concentre sur l'info pertinente »."
     ),
 )
-gcn_agg = "max" if gcn_aggregation.startswith("max") else "mean"
+gcn_agg = {"moyenne": "mean", "max": "max", "attention": "attention"}[gcn_aggregation.split()[0]]
+# Nom de l'architecture classique correspondante (pour les affichages)
+agg_label = {"mean": "GCN", "max": "GraphSAGE", "attention": "GAT"}[gcn_agg]
+gat_heads = st.sidebar.slider(
+    "Attention — têtes", 1, 8, 4,
+    disabled=not (is_graph and gcn_agg == "attention"),
+    help=(
+        "Nombre de mécanismes d'attention indépendants calculés en parallèle puis "
+        "moyennés (plusieurs façons de pondérer les voisins → plus stable). Actif "
+        "seulement avec l'agrégation « attention »."
+    ),
+)
 
 n_hidden_layers = st.sidebar.slider(
     "Nombre de couches cachées", 1, 8, 1,
@@ -381,10 +394,11 @@ torch.manual_seed(int(weight_seed))
 model = build_model()   # MLP (toujours construit ; utilisé uniquement en mode MLP)
 
 st.sidebar.markdown("---")
-if is_gcn:
+if is_graph:
+    heads_txt = f", {gat_heads} têtes" if gcn_agg == "attention" else ""
     st.sidebar.markdown(
-        f"**Modèle :** GCN — {gcn_layers_n} couche(s) de graphe × {neurons_per_layer}, "
-        f"k = {knn_k}"
+        f"**Modèle :** Réseau de graphe ({agg_label}) — {gcn_layers_n} couche(s) × "
+        f"{neurons_per_layer}, agrégation {gcn_agg}{heads_txt}, k = {knn_k}"
     )
 else:
     st.sidebar.markdown(f"**Modèle :** `{model}`")
@@ -1310,16 +1324,16 @@ def per_class_table(cm):
 
 
 # ─────────────────────────────────────────────
-# GCN — modèle, masques et visualisations (mode « convolution de graphe »)
+# Réseau de graphe — modèle, masques et visualisations (GCN / GraphSAGE / GAT)
 # ─────────────────────────────────────────────
 def build_gcn_model():
-    """Construit un GCN selon la sidebar (n_hidden_layers = couches de graphe)."""
+    """Construit le réseau de graphe selon la sidebar (agrégation, têtes, profondeur)."""
     out_dim = n_classes_eff if is_multiclass else 1
     gcn_layers = [neurons_per_layer] * gcn_layers_n
     head_layers = [max(neurons_per_layer // 2, 4)]
     return GCN(input_dim=2, gcn_layers=gcn_layers, head_layers=head_layers,
                output_dim=out_dim, activation=activation, aggregation=gcn_agg,
-               use_batchnorm=use_batchnorm)
+               heads=gat_heads, use_batchnorm=use_batchnorm)
 
 
 def gcn_masks(n):
@@ -1359,15 +1373,15 @@ def plot_gcn_pred(X, y, pred, te_idx):
                    edgecolors="black", linewidths=1.6, zorder=3,
                    label=f"test mal classé ({int(wrong.sum())})")
         ax.legend(fontsize=8)
-    ax.set_title("Prédictions du GCN (test mal classés entourés)")
+    ax.set_title("Prédictions (nœuds de test mal classés entourés)")
     ax.set_xlabel("x₁"); ax.set_ylabel("x₂")
     return fig
 
 
 def plot_gcn_latent(model, X, y, A_hat):
     """
-    Espace latent du GCN : les embeddings de nœuds renvoyés par ``encode()``
-    (après les couches de convolution, AVANT la tête). Affichage côte à côte de
+    Espace latent du réseau de graphe : les embeddings de nœuds renvoyés par
+    ``encode()`` (après les couches de graphe, AVANT la tête). Affichage côte à côte de
     l'espace d'entrée (coordonnées brutes) et de l'espace latent, ce dernier
     projeté en 2D par PCA si sa dimension dépasse 2. Un score de séparabilité
     (silhouette, de -1 à 1) résume à quel point les classes y sont distinctes.
@@ -1392,7 +1406,7 @@ def plot_gcn_latent(model, X, y, A_hat):
     fig, axes = plt.subplots(1, 2, figsize=(13, 6))
     for ax, P, title, axx, axy in [
         (axes[0], X, "Espace d'entrée (coordonnées brutes)", "x₁", "x₂"),
-        (axes[1], emb, f"Espace latent du GCN (dim {Z.shape[1]} → 2D) — "
+        (axes[1], emb, f"Espace latent (dim {Z.shape[1]} → 2D) — "
                        f"séparabilité {sil:.2f}", xl, yl),
     ]:
         for c in range(n_classes_eff):
@@ -1452,14 +1466,14 @@ def mlp_decision_regions(mlp_model, X, res=60):
     return xx, yy, pred.reshape(xx.shape)
 
 
-def plot_regions_compare(X, y, reg_gcn, reg_mlp, acc_gcn, acc_mlp):
-    """Régions de décision GCN (gauche) vs MLP (droite), points superposés."""
+def plot_regions_compare(X, y, reg_gcn, reg_mlp, acc_gcn, acc_mlp, left_label="GCN"):
+    """Régions de décision du réseau de graphe (gauche) vs MLP (droite)."""
     from matplotlib.colors import ListedColormap
     K = max(n_classes_eff, 2)
     cmap = ListedColormap(CLASS_COLORS[:K])
     fig, axes = plt.subplots(1, 2, figsize=(13, 6))
     for ax, (xx, yy, R), title, acc in [
-        (axes[0], reg_gcn, "GCN", acc_gcn),
+        (axes[0], reg_gcn, left_label, acc_gcn),
         (axes[1], reg_mlp, "MLP", acc_mlp),
     ]:
         ax.contourf(xx, yy, R, levels=np.arange(-0.5, K, 1.0), cmap=cmap, alpha=0.35)
@@ -1547,7 +1561,7 @@ with col2:
     boundary_placeholder = st.empty()
     status_placeholder = st.empty()
 
-    if (not is_gcn) and st.button("Entraîner le réseau", type="primary"):
+    if (not is_graph) and st.button("Entraîner le réseau", type="primary"):
         optimizer = make_optimizer(model)
         criterion = nn.CrossEntropyLoss() if is_multiclass else nn.BCEWithLogitsLoss()
         trainer = Trainer(model=model, optimizer=optimizer, criterion=criterion)
@@ -1642,10 +1656,10 @@ with col2:
         st.session_state.test_y = y_test
     else:
         # S'il n'y a pas eu d'entraînement encore, on affiche le message d'invite
-        if is_gcn:
+        if is_graph:
             boundary_placeholder.info(
-                "**Mode GCN** : l'entraînement et la visualisation du graphe se font "
-                "dans la section ci-dessous ⬇️"
+                "**Mode réseau de graphe** : l'entraînement et la visualisation du "
+                "graphe se font dans la section ci-dessous ⬇️"
             )
         elif st.session_state.trainer is None:
             boundary_placeholder.info(
@@ -1654,16 +1668,21 @@ with col2:
 
 
 # ─────────────────────────────────────────────
-# Mode GCN : graphe k-NN, entraînement transductif, prédictions
+# Mode réseau de graphe (GCN / GraphSAGE / GAT) : graphe k-NN, transductif
 # ─────────────────────────────────────────────
-if is_gcn:
+if is_graph:
+    _agg_desc = {
+        "mean": "chaque nœud agrège ses voisins par une **moyenne** à poids fixes (GCN)",
+        "max": "chaque nœud agrège ses voisins par un **max** par dimension (GraphSAGE)",
+        "attention": "chaque nœud pondère ses voisins par une **attention apprise** "
+                     "multi-têtes (GAT)",
+    }[gcn_agg]
     st.markdown("---")
-    st.subheader("GCN — convolution sur le graphe des k plus proches voisins")
+    st.subheader(f"Réseau de graphe — agrégation {agg_label}")
     st.caption(
-        "On construit un graphe k-NN sur le nuage de points, on applique des couches "
-        "de convolution de graphe (chaque nœud agrège ses voisins), puis une tête MLP "
-        "classe chaque nœud. Entraînement **transductif** : un seul graphe sur tous les "
-        "points, perte calculée sur les nœuds d'entraînement (les nœuds de test "
+        f"On construit un graphe k-NN sur le nuage de points : {_agg_desc}, puis une "
+        "tête MLP classe chaque nœud. Entraînement **transductif** : un seul graphe sur "
+        "tous les points, perte calculée sur les nœuds d'entraînement (les nœuds de test "
         "participent à la propagation, mais leur label n'est pas vu)."
     )
 
@@ -1678,7 +1697,7 @@ if is_gcn:
 
     with gcol2:
         st.markdown("**Entraînement & prédictions**")
-        if st.button("Entraîner le GCN", type="primary"):
+        if st.button("Entraîner le réseau de graphe", type="primary"):
             n = len(y)
             tr_idx, val_idx, te_idx = gcn_masks(n)
             m_tr = torch.tensor(np.isin(np.arange(n), tr_idx))
@@ -1693,7 +1712,7 @@ if is_gcn:
             crit = nn.CrossEntropyLoss() if is_multiclass else nn.BCEWithLogitsLoss()
 
             hist = {"train": [], "validation": []}
-            prog = st.progress(0.0, text="Entraînement du GCN…")
+            prog = st.progress(0.0, text="Entraînement du réseau de graphe…")
             torch.manual_seed(int(weight_seed))
             for epoch in range(n_epochs):
                 gcn.train()
@@ -1730,7 +1749,7 @@ if is_gcn:
             plt.close("all")
             st.line_chart(g["hist"])
         else:
-            st.info("Clique sur **Entraîner le GCN**.")
+            st.info("Clique sur **Entraîner le réseau de graphe**.")
 
     # ─── Précision / rappel par classe (sur les nœuds de test) ───
     g = st.session_state.gcn
@@ -1749,7 +1768,7 @@ if is_gcn:
 
         cc1, cc2 = st.columns([1, 1])
         with cc1:
-            st.pyplot(plot_confusion_matrix(cm_g, "Confusion — nœuds de test (GCN)"))
+            st.pyplot(plot_confusion_matrix(cm_g, f"Confusion — nœuds de test ({agg_label})"))
             plt.close("all")
         with cc2:
             st.table(per_class_table(cm_g))
@@ -1759,11 +1778,11 @@ if is_gcn:
             "classe, combien sont retrouvés. **Support** : nb de nœuds de test de la classe."
         )
 
-    # ─── Espace latent du GCN (embeddings de nœuds via encode()) ───
+    # ─── Espace latent du réseau de graphe (embeddings via encode()) ───
     g = st.session_state.gcn
     if g is not None and g.get("model") is not None:
         st.markdown("---")
-        st.markdown("**Espace latent du GCN — ce que « voient » les couches de convolution**")
+        st.markdown(f"**Espace latent ({agg_label}) — ce que « voient » les couches de graphe**")
         st.caption(
             "À gauche, l'espace d'entrée (coordonnées brutes). À droite, la "
             "représentation des nœuds renvoyée par `encode()` (après les couches de "
@@ -1774,11 +1793,11 @@ if is_gcn:
         st.pyplot(plot_gcn_latent(g["model"], g["X"], g["y"], g["A_hat"]))
         plt.close("all")
 
-    # ─── Régions de décision : GCN vs MLP (même découpage train/test) ───
+    # ─── Régions de décision : réseau de graphe vs MLP (même découpage) ───
     g = st.session_state.gcn
     if g is not None and g.get("model") is not None:
         st.markdown("---")
-        st.markdown("**Régions de décision — GCN vs MLP**")
+        st.markdown(f"**Régions de décision — {agg_label} vs MLP**")
         st.caption(
             "Pour colorer le plan, on insère une grille de points dans le graphe "
             "(chaque point relié à ses k plus proches voisins du dataset, sans modifier "
@@ -1809,14 +1828,14 @@ if is_gcn:
                 mpred = mout.argmax(1) if is_multiclass else (mout[:, 0] > 0).astype(int)
                 acc_mlp = float((mpred[g["te_idx"]] == g["y"][g["te_idx"]]).mean())
             st.pyplot(plot_regions_compare(g["X"], g["y"], reg_gcn, reg_mlp,
-                                           g["acc_test"], acc_mlp))
+                                           g["acc_test"], acc_mlp, left_label=agg_label))
             plt.close("all")
             st.caption(
-                f"Graphe à k = {g['k']}. Change **k** dans la sidebar puis ré-entraîne "
-                "le GCN pour voir l'effet de la taille du voisinage sur la frontière."
+                f"Graphe à k = {g['k']}. Change **k** ou l'**agrégation** dans la sidebar "
+                "puis ré-entraîne pour voir l'effet sur la frontière."
             )
 
-    # En mode GCN, on s'arrête là : les sections MLP ci-dessous ne s'appliquent pas.
+    # En mode graphe (GCN/GraphSAGE/GAT), on s'arrête là : les sections MLP ne s'appliquent pas.
     st.stop()
 
 
