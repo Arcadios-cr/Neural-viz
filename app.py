@@ -9,7 +9,11 @@ from models.mlp import MLP
 from models.mlp_bottleneck import MLPBottleneck
 from models.gcn import GCN
 from data.datasets import DATASETS, MULTICLASS_CAPABLE, get_dataset, split_dataset, to_dataloader
-from data.graphs import build_knn, knn_edges
+from data.graphs import build_knn, knn_edges, normalize_adj
+from data.sbm import make_sbm
+
+# Dataset spécial : le graphe est FOURNI (communautés), les features 2D sont faibles.
+SBM_NAME = "SBM (graphe communautaire)"
 from training.trainer import Trainer, EarlyStopping
 from training.metrics import evaluate
 from utils.hooks import ActivationCapture
@@ -258,7 +262,7 @@ min_delta = st.sidebar.select_slider(
 st.sidebar.header("Dataset")
 dataset_name = st.sidebar.selectbox(
     "Type de dataset",
-    list(DATASETS.keys()),
+    list(DATASETS.keys()) + [SBM_NAME],
     index=0,
     help=(
         "⭐ Two Gaussians — trivial (linéairement séparable)\n"
@@ -268,16 +272,19 @@ dataset_name = st.sidebar.selectbox(
         "🏁 Checkerboard — damier : demande beaucoup de frontières (de plans)\n"
         "⭐⭐ Moons / Circles / XOR — non linéairement séparables, simples\n"
         "⭐⭐⭐ Sinusoidal / Islands — frontières complexes\n"
-        "⭐⭐⭐⭐ Spirals — le boss final"
+        "⭐⭐⭐⭐ Spirals — le boss final\n"
+        "🕸️ SBM — graphe communautaire FOURNI + features 2D faibles : le cas où le "
+        "réseau de graphe gagne et le MLP échoue (à utiliser en mode « Réseau de graphe »)."
     ),
 )
+is_sbm = dataset_name == SBM_NAME
 n_classes = st.sidebar.slider(
     "Nombre de classes (K)", 2, 5, 2,
-    disabled=dataset_name not in MULTICLASS_CAPABLE,
+    disabled=not (dataset_name in MULTICLASS_CAPABLE or is_sbm),
     help=(
-        "Multi-classes disponible pour Blobs et Gaussian Quantiles. Les autres "
-        "datasets restent binaires (2 classes). K ≥ 3 active le mode multi-classes "
-        "(softmax + CrossEntropy + frontière multi-couleurs)."
+        "Multi-classes disponible pour Blobs, Gaussian Quantiles et SBM (= nombre de "
+        "communautés). Les autres datasets restent binaires. K ≥ 3 active le mode "
+        "multi-classes (softmax + CrossEntropy + frontière multi-couleurs)."
     ),
 )
 n_samples = st.sidebar.slider(
@@ -306,7 +313,15 @@ weight_seed = st.sidebar.number_input(
 # ─────────────────────────────────────────────
 # Génération du dataset + split train / val / test
 # ─────────────────────────────────────────────
-X, y = get_dataset(dataset_name, n_samples=n_samples, noise=noise, seed=int(seed), n_classes=n_classes)
+# Le SBM fournit AUSSI un graphe (A_sbm) ; les autres datasets n'ont pas de graphe
+# propre (il sera construit par k-NN en mode réseau de graphe).
+if is_sbm:
+    X, y, A_sbm = make_sbm(n_samples=n_samples, n_classes=n_classes,
+                           noise=noise, seed=int(seed))
+else:
+    X, y = get_dataset(dataset_name, n_samples=n_samples, noise=noise,
+                       seed=int(seed), n_classes=n_classes)
+    A_sbm = None
 
 # Nombre de classes RÉEL du dataset (robuste : certains datasets restent binaires).
 # K ≥ 3 → mode multi-classes (softmax + CrossEntropy) ; K = 2 → binaire (BCE).
@@ -1331,9 +1346,12 @@ def build_gcn_model():
     out_dim = n_classes_eff if is_multiclass else 1
     gcn_layers = [neurons_per_layer] * gcn_layers_n
     head_layers = [max(neurons_per_layer // 2, 4)]
+    # SBM : on force la BatchNorm — sur des features faibles, un petit réseau peut
+    # s'effondrer en multi-classes (prédire une seule classe) ; la BN stabilise.
+    bn = use_batchnorm or is_sbm
     return GCN(input_dim=2, gcn_layers=gcn_layers, head_layers=head_layers,
                output_dim=out_dim, activation=activation, aggregation=gcn_agg,
-               heads=gat_heads, use_batchnorm=use_batchnorm)
+               heads=gat_heads, use_batchnorm=bn)
 
 
 def gcn_masks(n):
@@ -1679,19 +1697,34 @@ if is_graph:
     }[gcn_agg]
     st.markdown("---")
     st.subheader(f"Réseau de graphe — agrégation {agg_label}")
-    st.caption(
-        f"On construit un graphe k-NN sur le nuage de points : {_agg_desc}, puis une "
-        "tête MLP classe chaque nœud. Entraînement **transductif** : un seul graphe sur "
-        "tous les points, perte calculée sur les nœuds d'entraînement (les nœuds de test "
-        "participent à la propagation, mais leur label n'est pas vu)."
-    )
+    if is_sbm:
+        st.caption(
+            f"Dataset **SBM** : le graphe est **fourni** (communautés), et {_agg_desc}, "
+            "puis une tête MLP classe chaque nœud. Les features 2D sont **faibles** "
+            "(communautés chevauchantes) → un MLP qui ne voit que les features échoue, "
+            "alors que le réseau de graphe exploite la **structure** des communautés. "
+            "Entraînement **transductif** (le slider *k* est ignoré : le graphe n'est pas "
+            "construit par k-NN). BatchNorm activée d'office (stabilise l'entraînement "
+            "sur features faibles)."
+        )
+    else:
+        st.caption(
+            f"On construit un graphe k-NN sur le nuage de points : {_agg_desc}, puis une "
+            "tête MLP classe chaque nœud. Entraînement **transductif** : un seul graphe sur "
+            "tous les points, perte calculée sur les nœuds d'entraînement (les nœuds de test "
+            "participent à la propagation, mais leur label n'est pas vu)."
+        )
 
-    A_hat, A_bin = build_knn(X, k=knn_k)
+    # SBM : graphe FOURNI (communautés) ; sinon graphe k-NN construit sur les coordonnées.
+    if is_sbm:
+        A_hat, A_bin = normalize_adj(A_sbm), A_sbm
+    else:
+        A_hat, A_bin = build_knn(X, k=knn_k)
     edges = knn_edges(A_bin)
 
     gcol1, gcol2 = st.columns(2)
     with gcol1:
-        st.markdown("**Graphe des voisins**")
+        st.markdown("**Graphe communautaire (SBM)**" if is_sbm else "**Graphe des voisins**")
         st.pyplot(plot_gcn_graph(X, y, edges))
         plt.close("all")
 
@@ -1793,9 +1826,56 @@ if is_graph:
         st.pyplot(plot_gcn_latent(g["model"], g["X"], g["y"], g["A_hat"]))
         plt.close("all")
 
-    # ─── Régions de décision : réseau de graphe vs MLP (même découpage) ───
+    # ─── SBM : le résultat — réseau de graphe (structure) vs MLP (features seules) ───
     g = st.session_state.gcn
-    if g is not None and g.get("model") is not None:
+    if is_sbm and g is not None and g.get("model") is not None:
+        st.markdown("---")
+        st.markdown(f"**Le résultat — {agg_label} (structure) vs MLP (features seules)**")
+        st.caption(
+            "On entraîne un MLP sur les **mêmes features 2D** (sans le graphe), même "
+            "découpage. Il ne voit que des features faibles → il échoue ; le réseau de "
+            "graphe, lui, exploite la **structure** des communautés."
+        )
+        out_dim = n_classes_eff if is_multiclass else 1
+        torch.manual_seed(int(weight_seed))
+        mlp_cmp = MLP(2, [neurons_per_layer, neurons_per_layer], out_dim, activation=activation)
+        opt = torch.optim.Adam(mlp_cmp.parameters(), lr=learning_rate)
+        crit = nn.CrossEntropyLoss() if is_multiclass else nn.BCEWithLogitsLoss()
+        Xtr = torch.tensor(g["X"][g["tr_idx"]], dtype=torch.float32)
+        ytr = (torch.tensor(g["y"][g["tr_idx"]], dtype=torch.long) if is_multiclass
+               else torch.tensor(g["y"][g["tr_idx"]], dtype=torch.float32).view(-1, 1))
+        torch.manual_seed(int(weight_seed))
+        for _ in range(n_epochs):
+            mlp_cmp.train(); opt.zero_grad(); crit(mlp_cmp(Xtr), ytr).backward(); opt.step()
+        mlp_cmp.eval()
+        with torch.no_grad():
+            mout = mlp_cmp(torch.tensor(g["X"], dtype=torch.float32)).numpy()
+        mpred = mout.argmax(1) if is_multiclass else (mout[:, 0] > 0).astype(int)
+        acc_mlp = float((mpred[g["te_idx"]] == g["y"][g["te_idx"]]).mean())
+
+        cc1, cc2 = st.columns([1, 1])
+        with cc1:
+            mm1, mm2 = st.columns(2)
+            mm1.metric(f"Réseau de graphe ({agg_label})", f"{g['acc_test'] * 100:.1f} %")
+            mm2.metric("MLP (features seules)", f"{acc_mlp * 100:.1f} %",
+                       delta=f"{(acc_mlp - g['acc_test']) * 100:.1f} pts")
+        with cc2:
+            fig_cmp, ax_cmp = plt.subplots(figsize=(5, 4))
+            chance = 100.0 / max(n_classes_eff, 2)
+            ax_cmp.bar(["MLP\n(features)", f"{agg_label}\n(graphe)"],
+                       [acc_mlp * 100, g["acc_test"] * 100], color=["#9C27B0", "#4CAF50"])
+            ax_cmp.axhline(chance, color="gray", ls="--", lw=1, label=f"hasard ({chance:.0f} %)")
+            ax_cmp.set_ylim(0, 100); ax_cmp.set_ylabel("accuracy test (%)"); ax_cmp.legend(fontsize=8)
+            fig_cmp.tight_layout(); st.pyplot(fig_cmp); plt.close(fig_cmp)
+        st.success(
+            f"Le réseau de graphe atteint **{g['acc_test'] * 100:.0f} %** là où le MLP "
+            f"plafonne à **{acc_mlp * 100:.0f} %** (≈ hasard) : **c'est la structure du "
+            "graphe qui porte l'information**, pas les features."
+        )
+
+    # ─── Régions de décision : réseau de graphe vs MLP (datasets à coordonnées) ───
+    g = st.session_state.gcn
+    if (not is_sbm) and g is not None and g.get("model") is not None:
         st.markdown("---")
         st.markdown(f"**Régions de décision — {agg_label} vs MLP**")
         st.caption(
