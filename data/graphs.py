@@ -43,3 +43,16 @@ def knn_edges(A_bin: np.ndarray):
     """Liste des arêtes (i, j) avec i < j, pour le tracé du graphe."""
     iu, ju = np.where(np.triu(A_bin, k=1) > 0)
     return list(zip(iu.tolist(), ju.tolist()))
+
+
+def normalize_adj(A_bin: np.ndarray) -> torch.Tensor:
+    """
+    Normalisation de Kipf : Â = D^{-1/2} (A + I) D^{-1/2}, à partir d'une
+    adjacence binaire quelconque (k-NN ou graphe fourni type SBM). Ajoute les
+    self-loops puis normalise par le degré → torch (n, n).
+    """
+    n = A_bin.shape[0]
+    A = A_bin.astype(np.float32) + np.eye(n, dtype=np.float32)
+    d_inv_sqrt = 1.0 / np.sqrt(A.sum(axis=1))
+    A_hat = d_inv_sqrt[:, None] * A * d_inv_sqrt[None, :]
+    return torch.tensor(A_hat, dtype=torch.float32)
