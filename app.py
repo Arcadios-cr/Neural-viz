@@ -1339,6 +1339,44 @@ def per_class_table(cm):
 
 
 # ─────────────────────────────────────────────
+# Robustesse à la rotation (test de Barthe : « Pb de rotation de données ? »)
+# ─────────────────────────────────────────────
+def rotate_points(X: np.ndarray, deg: float) -> np.ndarray:
+    """Fait tourner un nuage 2D de `deg` degrés autour de l'origine."""
+    t = np.deg2rad(deg)
+    R = np.array([[np.cos(t), -np.sin(t)], [np.sin(t), np.cos(t)]], dtype=np.float32)
+    return (X @ R.T).astype(np.float32)
+
+
+def plot_rotation_robustness(model, X_test, y_test):
+    """
+    Accuracy du modèle entraîné quand on fait tourner le TEST set de 0 à 180°.
+    Nos features = coordonnées absolues → le modèle n'est PAS invariant par
+    rotation (sauf si le problème l'est déjà, ex. cercles concentriques).
+    Renvoie (fig, accuracies).
+    """
+    model.eval()
+    angles = list(range(0, 181, 15))
+    accs = []
+    for d in angles:
+        with torch.no_grad():
+            out = model(torch.tensor(rotate_points(X_test, d))).numpy()
+        pred = out.argmax(1) if out.shape[1] > 1 else (out[:, 0] > 0).astype(int)
+        accs.append(float((pred == y_test).mean()) * 100)
+    fig, ax = plt.subplots(figsize=(7, 4))
+    ax.plot(angles, accs, "-o", color="#2196F3", zorder=3)
+    ax.axhline(accs[0], color="gray", ls=":", lw=1, label=f"sans rotation ({accs[0]:.0f} %)")
+    ax.set_xlabel("angle de rotation du test (°)")
+    ax.set_ylabel("accuracy test (%)")
+    ax.set_ylim(0, 100)
+    ax.set_xticks(angles)
+    ax.set_title("Robustesse à la rotation des données")
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    return fig, accs
+
+
+# ─────────────────────────────────────────────
 # Réseau de graphe — modèle, masques et visualisations (GCN / GraphSAGE / GAT)
 # ─────────────────────────────────────────────
 def build_gcn_model():
@@ -2438,3 +2476,43 @@ if st.session_state.test_report is not None:
             "en ligne). **Support** : nombre de points de test de la classe. La "
             "moyenne de chaque colonne redonne les valeurs « macro » ci-dessus."
         )
+
+
+# ─────────────────────────────────────────────
+# Robustesse à la rotation des données (« Pb de rotation ? » — Barthe)
+# ─────────────────────────────────────────────
+if (st.session_state.test_report is not None
+        and st.session_state.trainer is not None
+        and st.session_state.test_X is not None):
+    st.markdown("---")
+    st.subheader("Robustesse à la rotation des données")
+    st.caption(
+        "On fait tourner le **test set** autour de l'origine (0 → 180°) et on ré-évalue "
+        "le modèle **déjà entraîné**. Comme nos features sont les **coordonnées absolues** "
+        "(x₁, x₂), le modèle n'est en général **pas invariant par rotation** : l'accuracy "
+        "chute quand on tourne les données. Exception : un problème déjà invariant par "
+        "rotation (ex. cercles concentriques, où la classe = le rayon)."
+    )
+    fig_rot, accs_rot = plot_rotation_robustness(
+        st.session_state.trainer.model, st.session_state.test_X, st.session_state.test_y
+    )
+    c_rot1, c_rot2 = st.columns([2, 1])
+    with c_rot1:
+        st.pyplot(fig_rot)
+        plt.close(fig_rot)
+    with c_rot2:
+        drop = accs_rot[0] - min(accs_rot)
+        st.metric("Sans rotation", f"{accs_rot[0]:.0f} %")
+        st.metric("Pire cas (rotation)", f"{min(accs_rot):.0f} %", delta=f"-{drop:.0f} pts")
+        if drop < 10:
+            st.success("Quasi invariant : ce problème ne dépend pas de l'orientation.")
+        else:
+            st.warning(
+                "Pas invariant : l'accuracy chute → le modèle a appris une orientation "
+                "précise (features = coordonnées absolues)."
+            )
+    st.caption(
+        "**Pour Barthe** : rendre un modèle invariant par rotation demanderait des "
+        "**features invariantes** (distances, rayon, angles relatifs…), pas seulement un "
+        "graphe k-NN invariant — sur nos datasets, ce sont les coordonnées qui dominent."
+    )
