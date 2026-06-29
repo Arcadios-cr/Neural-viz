@@ -1475,6 +1475,70 @@ def plot_gcn_latent(model, X, y, A_hat):
     return fig
 
 
+def gcn_attention(model, X, A_hat):
+    """Poids d'attention de la 1ère couche, moyennés sur les têtes → matrice (n, n)."""
+    model.eval()
+    with torch.no_grad():
+        a = model.gcns[0].attention_weights(torch.tensor(X, dtype=torch.float32), A_hat)
+    return a.mean(-1).numpy()          # α[i, j] = attention que i donne à j
+
+
+def plot_attention_graph(X, y, edges, alpha, A_bin, focus=None):
+    """
+    Graphe avec arêtes colorées/épaissies par l'attention (moyenne des têtes).
+    Si `focus` est donné, met en évidence ce nœud et l'attention qu'il DONNE à
+    ses voisins (traits noirs, épaisseur ∝ α).
+    """
+    from matplotlib.collections import LineCollection
+    fig, ax = plt.subplots(figsize=(7, 6))
+
+    if edges:
+        w = np.array([(alpha[i, j] + alpha[j, i]) / 2 for (i, j) in edges])
+        segs = [[(X[i, 0], X[i, 1]), (X[j, 0], X[j, 1])] for (i, j) in edges]
+        lc = LineCollection(segs, cmap="viridis", array=w, alpha=0.6, zorder=1,
+                            linewidths=0.3 + 3.0 * (w / (w.max() + 1e-9)))
+        ax.add_collection(lc)
+        plt.colorbar(lc, ax=ax, fraction=0.046, pad=0.04, label="attention α (moyenne)")
+
+    for c in range(n_classes_eff):
+        m = y == c
+        ax.scatter(X[m, 0], X[m, 1], c=CLASS_COLORS[c % len(CLASS_COLORS)], s=22,
+                   edgecolors="white", linewidths=0.4, zorder=2)
+
+    if focus is not None:
+        nbrs = np.where(A_bin[focus] > 0)[0]
+        if len(nbrs):
+            aw = alpha[focus, nbrs]
+            fsegs = [[(X[focus, 0], X[focus, 1]), (X[j, 0], X[j, 1])] for j in nbrs]
+            ax.add_collection(LineCollection(
+                fsegs, colors="black", zorder=3,
+                linewidths=0.6 + 5.0 * (aw / (aw.max() + 1e-9))))
+        ax.scatter([X[focus, 0]], [X[focus, 1]], s=240, facecolors="none",
+                   edgecolors="black", linewidths=2.4, zorder=4)
+        ax.set_title(f"Nœud {focus} en surbrillance — épaisseur des traits noirs = "
+                     "attention qu'il donne à chaque voisin")
+    else:
+        ax.set_title("Attention apprise (couleur/épaisseur des arêtes = poids α)")
+    ax.set_xlabel("x₁"); ax.set_ylabel("x₂")
+    return fig
+
+
+def plot_node_attention_bars(focus, alpha, A_bin, y):
+    """Voisins du nœud `focus` classés par attention reçue (barres colorées par classe)."""
+    nbrs = np.where(A_bin[focus] > 0)[0]
+    aw = alpha[focus, nbrs]
+    order = np.argsort(aw)[::-1][:8]                    # top 8 voisins
+    nbrs, aw = nbrs[order], aw[order]
+    fig, ax = plt.subplots(figsize=(5, 4))
+    colors = [CLASS_COLORS[int(y[j]) % len(CLASS_COLORS)] for j in nbrs]
+    ax.barh([f"nœud {j} (cl. {int(y[j])})" for j in nbrs][::-1], aw[::-1],
+            color=colors[::-1])
+    ax.set_xlabel("poids d'attention α")
+    ax.set_title(f"Voisins du nœud {focus} (classe {int(y[focus])}), par attention")
+    fig.tight_layout()
+    return fig
+
+
 def _grid(X, res=60):
     """Grille régulière couvrant le nuage de points (pour les régions de décision)."""
     x_min, x_max = X[:, 0].min() - 0.5, X[:, 0].max() + 0.5
@@ -1808,7 +1872,7 @@ if is_graph:
                 X=X, y=y, edges=edges, pred=pred, te_idx=te_idx, tr_idx=tr_idx,
                 acc_test=float((pred[te_idx] == y[te_idx]).mean()),
                 acc_train=float((pred[tr_idx] == y[tr_idx]).mean()),
-                hist=hist, model=gcn, A_hat=A_hat, k=knn_k,
+                hist=hist, model=gcn, A_hat=A_hat, A_bin=A_bin, k=knn_k, agg=gcn_agg,
             )
 
         g = st.session_state.gcn
@@ -1863,6 +1927,54 @@ if is_graph:
         )
         st.pyplot(plot_gcn_latent(g["model"], g["X"], g["y"], g["A_hat"]))
         plt.close("all")
+
+    # ─── Attention : sur quels voisins le modèle se concentre (GAT) ───
+    g = st.session_state.gcn
+    if g is not None and g.get("model") is not None and g.get("agg") == "attention":
+        st.markdown("---")
+        st.markdown("**Attention — sur quels voisins le modèle se concentre**")
+        st.caption(
+            "Chaque nœud du GAT pondère ses voisins par une **attention apprise** α. "
+            "Les arêtes sont colorées/épaissies selon cette attention (moyenne des "
+            "têtes). Choisis un nœud pour voir sur quels voisins il « se concentre ». "
+            "⚠️ L'attention indique *quels voisins pèsent*, mais elle n'est **pas** une "
+            "explication complète du modèle (résultat connu : moyenner les poids "
+            "d'attention ne suffit pas à interpréter un GAT)."
+        )
+        alpha = gcn_attention(g["model"], g["X"], g["A_hat"])
+        focus = st.slider("Nœud à inspecter", 0, len(g["y"]) - 1, 0, key="att_focus")
+        ac1, ac2 = st.columns([3, 2])
+        with ac1:
+            st.pyplot(plot_attention_graph(g["X"], g["y"], g["edges"], alpha,
+                                           g["A_bin"], focus=focus))
+            plt.close("all")
+        with ac2:
+            st.pyplot(plot_node_attention_bars(focus, alpha, g["A_bin"], g["y"]))
+            plt.close("all")
+
+        # Insight quantitatif : attention moyenne même classe vs classe différente,
+        # comparée à l'uniforme (1/degré) → diagnostique si le GAT « sélectionne » vraiment.
+        same = diff = 0.0
+        ns = nd = 0
+        for i, j in g["edges"]:
+            a = (alpha[i, j] + alpha[j, i]) / 2
+            if g["y"][i] == g["y"][j]:
+                same += a; ns += 1
+            else:
+                diff += a; nd += 1
+        if ns and nd:
+            sm, dm = same / ns, diff / nd
+            uni = 1.0 / (g["A_bin"].sum(1).mean() + 1)   # attention uniforme moyenne ≈ 1/(degré+1)
+            if sm > 1.15 * dm:
+                verdict = "→ le GAT **privilégie** nettement les voisins de même classe."
+            else:
+                verdict = (f"→ l'attention est **quasi uniforme** (≈ 1/degré = {uni:.3f}) : "
+                           "sur ces données 2D, le GAT se comporte presque comme la "
+                           "**moyenne (GCN)** — c'est pourquoi *GAT ≈ GCN* ici.")
+            st.caption(
+                f"Attention moyenne par arête : **même classe** {sm:.3f} vs "
+                f"**classe différente** {dm:.3f}. {verdict}"
+            )
 
     # ─── SBM : le résultat — réseau de graphe (structure) vs MLP (features seules) ───
     g = st.session_state.gcn
