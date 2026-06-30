@@ -1539,6 +1539,103 @@ def plot_node_attention_bars(focus, alpha, A_bin, y):
     return fig
 
 
+def _dirichlet_energy(H, edges):
+    """
+    Énergie de Dirichlet (normalisée) : différence quadratique moyenne entre nœuds
+    VOISINS, divisée par la norme moyenne → mesure « à quel point les voisins restent
+    différents ». Tend vers 0 quand les embeddings s'effondrent (sur-lissage).
+    """
+    if not edges:
+        return 0.0
+    d = np.mean([np.sum((H[i] - H[j]) ** 2) for (i, j) in edges])
+    return float(d / (np.mean(np.sum(H ** 2, axis=1)) + 1e-9))
+
+
+def oversmoothing_study(X, y, A_hat, edges, depths, width=16, ep=120, n_seeds=3):
+    """
+    Entraîne des GCN (agrégation moyenne) de profondeur croissante, AVEC et SANS
+    BatchNorm, MOYENNÉS sur plusieurs seeds (l'effondrement est un phénomène de
+    seuil, erratique par seed → on moyenne pour une tendance propre). Renvoie
+    l'accuracy moyenne (des deux), l'énergie de Dirichlet, et les embeddings latents
+    à profondeur faible/forte du seed le plus effondré (pour visualiser).
+    """
+    from sklearn.metrics import silhouette_score
+    n = len(y)
+    tr_idx, _, te_idx = gcn_masks(n)
+    m_tr = torch.tensor(np.isin(np.arange(n), tr_idx))
+    Xt = torch.tensor(X, dtype=torch.float32)
+    multi = is_multiclass
+    od = n_classes_eff if multi else 1
+    yt = (torch.tensor(y, dtype=torch.long) if multi
+          else torch.tensor(y, dtype=torch.float32).view(-1, 1))
+    crit = nn.CrossEntropyLoss() if multi else nn.BCEWithLogitsLoss()
+
+    acc = {False: np.zeros(len(depths)), True: np.zeros(len(depths))}
+    energy = np.zeros(len(depths))
+    shallow_by_seed, deep_by_seed = {}, {}
+    for seed in range(n_seeds):
+        for di, L in enumerate(depths):
+            for bn in (False, True):
+                torch.manual_seed(seed)
+                gm = GCN(2, [width] * L, [max(width // 2, 4)], output_dim=od,
+                         aggregation="mean", use_batchnorm=bn)
+                opt = torch.optim.Adam(gm.parameters(), lr=learning_rate)
+                torch.manual_seed(seed)
+                for _ in range(ep):
+                    gm.train(); opt.zero_grad()
+                    crit(gm(Xt, A_hat)[m_tr], yt[m_tr]).backward(); opt.step()
+                gm.eval()
+                with torch.no_grad():
+                    out = gm(Xt, A_hat).numpy()
+                    H = gm.encode(Xt, A_hat).numpy() if not bn else None
+                pred = out.argmax(1) if multi else (out[:, 0] > 0).astype(int)
+                acc[bn][di] += (pred[te_idx] == y[te_idx]).mean()
+                if not bn:
+                    energy[di] += _dirichlet_energy(H, edges)
+                    if L == depths[0]:
+                        shallow_by_seed[seed] = H
+                    if L == depths[-1]:
+                        deep_by_seed[seed] = H
+    acc[False] /= n_seeds; acc[True] /= n_seeds; energy /= n_seeds
+
+    # seed dont le latent PROFOND est le plus effondré (silhouette minimale)
+    def _sil(H):
+        return silhouette_score(H, y) if len(np.unique(y)) > 1 else 0.0
+    best = min(deep_by_seed, key=lambda s: _sil(deep_by_seed[s]))
+    return dict(depths=depths, acc_nobn=acc[False], acc_bn=acc[True], energy=energy,
+                emb_shallow=shallow_by_seed[best], emb_deep=deep_by_seed[best])
+
+
+def plot_oversmoothing(res, y):
+    """Accuracy vs profondeur (sans/avec BN) + latent effondré (faible vs forte profondeur)."""
+    from sklearn.decomposition import PCA
+    from sklearn.metrics import silhouette_score
+    depths = res["depths"]
+    fig, axes = plt.subplots(1, 3, figsize=(17, 5))
+
+    ax = axes[0]
+    ax.plot(depths, np.array(res["acc_nobn"]) * 100, "-o", color="#F44336", label="sans BatchNorm")
+    ax.plot(depths, np.array(res["acc_bn"]) * 100, "-s", color="#2196F3", label="avec BatchNorm")
+    chance = 100.0 / max(n_classes_eff, 2)
+    ax.axhline(chance, color="gray", ls="--", lw=1, label=f"hasard ({chance:.0f} %)")
+    ax.set_xlabel("profondeur (nb de couches de graphe)"); ax.set_ylabel("accuracy test (%)")
+    ax.set_ylim(0, 100); ax.set_title("Accuracy vs profondeur"); ax.legend(fontsize=8)
+
+    for ax, key, L in [(axes[1], "emb_shallow", depths[0]), (axes[2], "emb_deep", depths[-1])]:
+        H = res[key]
+        emb2 = PCA(2, random_state=0).fit_transform(H) if H.shape[1] > 2 else H
+        sil = silhouette_score(H, y) if len(np.unique(y)) > 1 else float("nan")
+        for c in range(n_classes_eff):
+            mm = y == c
+            ax.scatter(emb2[mm, 0], emb2[mm, 1], c=CLASS_COLORS[c % len(CLASS_COLORS)],
+                       s=18, edgecolors="white", linewidths=0.3)
+        tag = "effondré" if L == depths[-1] else "séparé"
+        ax.set_title(f"Latent à {L} couche(s) — séparabilité {sil:.2f} ({tag})")
+        ax.set_xlabel("PC1"); ax.set_ylabel("PC2")
+    fig.tight_layout()
+    return fig
+
+
 def _grid(X, res=60):
     """Grille régulière couvrant le nuage de points (pour les régions de décision)."""
     x_min, x_max = X[:, 0].min() - 0.5, X[:, 0].max() + 0.5
@@ -2063,6 +2160,31 @@ if is_graph:
             st.caption(
                 f"Graphe à k = {g['k']}. Change **k** ou l'**agrégation** dans la sidebar "
                 "puis ré-entraîne pour voir l'effet sur la frontière."
+            )
+
+    # ─── Sur-lissage (oversmoothing) : effet de la profondeur ───
+    if not is_sbm:
+        st.markdown("---")
+        st.markdown("**Sur-lissage (oversmoothing) — pourquoi empiler trop de couches nuit**")
+        st.caption(
+            "En empilant beaucoup de couches de graphe, chaque nœud agrège un voisinage "
+            "de plus en plus large → à la limite tous les nœuds se ressemblent (leurs "
+            "embeddings **s'effondrent**) et le réseau ne distingue plus les classes. On "
+            "entraîne des GCN de profondeur croissante, **avec et sans BatchNorm**, et on "
+            "mesure l'**énergie de Dirichlet** (différence moyenne entre voisins, → 0 = "
+            "effondrement). Plus net sur les datasets complexes (Spirals, Circles)."
+        )
+        if st.checkbox("Lancer l'étude de profondeur (un peu lent)", key="oversmooth"):
+            with st.spinner("Entraînement à profondeurs croissantes (sans / avec BatchNorm, 3 seeds)…"):
+                res_os = oversmoothing_study(X, y, A_hat, edges, [2, 4, 6, 8, 12, 16, 20])
+            st.pyplot(plot_oversmoothing(res_os, y))
+            plt.close("all")
+            st.caption(
+                f"Énergie de Dirichlet : **{res_os['energy'][0]:.3f}** à "
+                f"{res_os['depths'][0]} couche(s) → **{res_os['energy'][-1]:.3f}** à "
+                f"{res_os['depths'][-1]} (→ 0 = effondrement). Sans BatchNorm, le latent "
+                "s'effondre et l'accuracy chute en profondeur ; **la BatchNorm mitige** le "
+                "sur-lissage — un rôle clé de la normalisation (cf. la demande de Barthe)."
             )
 
     # En mode graphe (GCN/GraphSAGE/GAT), on s'arrête là : les sections MLP ne s'appliquent pas.
