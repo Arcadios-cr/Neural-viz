@@ -296,6 +296,16 @@ n_samples = st.sidebar.slider(
     ),
 )
 noise = st.sidebar.slider("Niveau de bruit", 0.0, 1.0, 0.2, step=0.05)
+sbm_homophily = st.sidebar.slider(
+    "SBM — homophilie du graphe", 0.5, 1.0, 0.9, step=0.05,
+    disabled=not is_sbm,
+    help=(
+        "Force du graphe communautaire : fraction des arêtes qui restent DANS une "
+        "communauté. **0.5** = graphe aléatoire (n'aide pas → réseau de graphe ≈ MLP) ; "
+        "**→ 1.0** = communautés pures (le graphe porte l'info → le réseau de graphe "
+        "gagne). Le degré moyen reste constant."
+    ),
+)
 seed = st.sidebar.number_input("Seed (données)", value=42, step=1)
 weight_seed = st.sidebar.number_input(
     "Seed (initialisation des poids)",
@@ -317,7 +327,7 @@ weight_seed = st.sidebar.number_input(
 # propre (il sera construit par k-NN en mode réseau de graphe).
 if is_sbm:
     X, y, A_sbm = make_sbm(n_samples=n_samples, n_classes=n_classes,
-                           noise=noise, seed=int(seed))
+                           noise=noise, seed=int(seed), homophily=sbm_homophily)
 else:
     X, y = get_dataset(dataset_name, n_samples=n_samples, noise=noise,
                        seed=int(seed), n_classes=n_classes)
@@ -1636,6 +1646,70 @@ def plot_oversmoothing(res, y):
     return fig
 
 
+def homophily_study(n_samples, n_classes, noise, seed, homophily_values, n_seeds=3, ep=150):
+    """
+    Balaye l'homophilie du graphe SBM : pour chaque valeur, régénère un SBM et
+    compare l'accuracy d'un réseau de graphe (qui voit la structure) et d'un MLP
+    (features seules). Moyenné sur quelques seeds. Renvoie (gcn_acc%, mlp_acc%).
+    """
+    multi = n_classes >= 3
+    od = n_classes if multi else 1
+    crit = nn.CrossEntropyLoss() if multi else nn.BCEWithLogitsLoss()
+    gcn_acc = np.zeros(len(homophily_values))
+    mlp_acc = np.zeros(len(homophily_values))
+    for si in range(n_seeds):
+        for hi, h in enumerate(homophily_values):
+            X, y, A = make_sbm(n_samples, n_classes, noise, seed + si, homophily=h)
+            A_hat = normalize_adj(A)
+            n = len(y)
+            perm = np.random.default_rng(seed + si).permutation(n)
+            tr, te = perm[:int(.6 * n)], perm[int(.8 * n):]
+            Xt = torch.tensor(X)
+            yt = (torch.tensor(y) if multi else torch.tensor(y, dtype=torch.float32).view(-1, 1))
+            m = torch.tensor(np.isin(np.arange(n), tr))
+            # réseau de graphe (avec BatchNorm, comme le SBM en prod)
+            torch.manual_seed(0)
+            gm = GCN(2, [16, 16], [8], output_dim=od, aggregation="mean", use_batchnorm=True)
+            opt = torch.optim.Adam(gm.parameters(), lr=learning_rate)
+            for _ in range(ep):
+                gm.train(); opt.zero_grad(); crit(gm(Xt, A_hat)[m], yt[m]).backward(); opt.step()
+            gm.eval()
+            with torch.no_grad():
+                og = gm(Xt, A_hat).numpy()
+            pg = og.argmax(1) if multi else (og[:, 0] > 0).astype(int)
+            gcn_acc[hi] += (pg[te] == y[te]).mean()
+            # MLP (features seules) — insensible à l'homophilie (features inchangées)
+            torch.manual_seed(0)
+            ml = MLP(2, [16, 16], od, activation="relu")
+            opt = torch.optim.Adam(ml.parameters(), lr=learning_rate)
+            for _ in range(ep):
+                ml.train(); opt.zero_grad(); crit(ml(Xt[tr]), yt[tr]).backward(); opt.step()
+            ml.eval()
+            with torch.no_grad():
+                om = ml(Xt).numpy()
+            pm = om.argmax(1) if multi else (om[:, 0] > 0).astype(int)
+            mlp_acc[hi] += (pm[te] == y[te]).mean()
+    return gcn_acc / n_seeds * 100, mlp_acc / n_seeds * 100
+
+
+def plot_homophily(homophily_values, gcn_acc, mlp_acc, n_classes):
+    """Accuracy réseau de graphe vs MLP en fonction de l'homophilie (écart ombré)."""
+    hv = np.array(homophily_values)
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.fill_between(hv, mlp_acc, gcn_acc, where=(gcn_acc >= mlp_acc),
+                    color="#4CAF50", alpha=0.12, label="gain du graphe")
+    ax.plot(hv, gcn_acc, "-o", color="#4CAF50", label="Réseau de graphe (structure)")
+    ax.plot(hv, mlp_acc, "-s", color="#9C27B0", label="MLP (features seules)")
+    chance = 100.0 / max(n_classes, 2)
+    ax.axhline(chance, color="gray", ls="--", lw=1, label=f"hasard ({chance:.0f} %)")
+    ax.set_xlabel("homophilie du graphe  (0.5 = aléatoire  →  1.0 = communautés pures)")
+    ax.set_ylabel("accuracy test (%)"); ax.set_ylim(0, 100)
+    ax.set_title("À partir de quand le graphe sert ? — écart GCN vs MLP selon l'homophilie")
+    ax.legend(fontsize=9)
+    fig.tight_layout()
+    return fig
+
+
 def _grid(X, res=60):
     """Grille régulière couvrant le nuage de points (pour les régions de décision)."""
     x_min, x_max = X[:, 0].min() - 0.5, X[:, 0].max() + 0.5
@@ -2119,6 +2193,30 @@ if is_graph:
             f"plafonne à **{acc_mlp * 100:.0f} %** (≈ hasard) : **c'est la structure du "
             "graphe qui porte l'information**, pas les features."
         )
+
+    # ─── SBM : loi de l'homophilie — « à partir de quand le graphe sert ? » ───
+    if is_sbm:
+        st.markdown("---")
+        st.markdown("**Loi de l'homophilie — à partir de quand le graphe sert ?**")
+        st.caption(
+            "On balaie l'**homophilie du graphe** (0.5 = aléatoire → 1.0 = communautés "
+            "pures, à degré moyen constant) et on compare, à chaque valeur, un réseau de "
+            "graphe (structure) à un MLP (features seules). Le MLP est **insensible** à "
+            "l'homophilie ; le réseau de graphe **gagne proportionnellement** à l'homophilie."
+        )
+        if st.checkbox("Balayer l'homophilie (un peu lent)", key="homophily_sweep"):
+            hvals = [0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 1.0]
+            with st.spinner("Entraînement sur toute la plage d'homophilie (3 seeds)…"):
+                ga_h, ma_h = homophily_study(n_samples, n_classes, noise, int(seed), hvals)
+            st.pyplot(plot_homophily(hvals, ga_h, ma_h, n_classes))
+            plt.close("all")
+            st.caption(
+                f"À gauche (aléatoire) le réseau de graphe est au niveau du MLP "
+                f"({ga_h[0]:.0f} % vs {ma_h[0]:.0f} %) ; à droite (communautés pures) il "
+                f"**écrase** le MLP ({ga_h[-1]:.0f} % vs {ma_h[-1]:.0f} %). ➡️ **Un GNN aide "
+                "proportionnellement à l'information portée par le graphe** — la réponse à "
+                "« quand un réseau de graphe bat-il un MLP ? »."
+            )
 
     # ─── Régions de décision : réseau de graphe vs MLP (datasets à coordonnées) ───
     g = st.session_state.gcn
