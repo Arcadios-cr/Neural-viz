@@ -18,18 +18,26 @@ le MLP ne peut pas. On reste en 2D donc tout est visualisable.
 
 import numpy as np
 
-P_IN, P_OUT = 0.15, 0.01     # densité d'arêtes intra / inter communauté (homophile)
+AVG_DEG = 12.0               # degré moyen visé (constant quelle que soit l'homophilie)
 SEP = 0.35                   # séparation des centres de features (petite = faible)
 
 
 def make_sbm(n_samples: int = 300, n_classes: int = 2, noise: float = 0.5,
-             seed: int = 42):
+             seed: int = 42, homophily: float = 0.9):
     """
     Génère un SBM à `n_classes` communautés.
 
+    `homophily` ∈ [0.5, 1.0] = fraction des arêtes qui restent DANS une communauté :
+      - 0.5 → graphe (quasi) aléatoire : autant d'arêtes intra qu'inter → le graphe
+        ne porte AUCUNE info de communauté → le réseau de graphe retombe au niveau
+        du MLP ;
+      - → 1.0 → communautés de plus en plus pures → le graphe porte l'info → le
+        réseau de graphe gagne.
+    Le degré moyen est maintenu ~constant (AVG_DEG) pour ne pas confondre densité et
+    homophilie.
+
     Retourne (X, y, A_bin) :
-      - X (n, 2)  : features 2D FAIBLES (centres par classe à peine séparés + bruit),
-                    écart-type piloté par `noise` (plus de bruit = features plus inutiles) ;
+      - X (n, 2)  : features 2D FAIBLES (centres par classe à peine séparés + bruit) ;
       - y (n,)    : la communauté de chaque nœud (= sa classe) ;
       - A_bin (n, n) : adjacence binaire symétrique du graphe SBM (sans self-loop).
     """
@@ -38,9 +46,16 @@ def make_sbm(n_samples: int = 300, n_classes: int = 2, noise: float = 0.5,
     n = n_per * n_classes
     y = np.repeat(np.arange(n_classes), n_per)
 
-    # ─── Graphe SBM : P[i,j] = P_IN si même communauté, P_OUT sinon ───
+    # ─── Probas d'arête intra (p_in) / inter (p_out) telles que le ratio =
+    #     homophily/(1-homophily) et le degré moyen ≈ AVG_DEG ───
+    n_intra = n_per - 1                     # voisins potentiels de même communauté
+    n_inter = (n_classes - 1) * n_per       # voisins potentiels d'autres communautés
+    t = AVG_DEG / (homophily * n_intra + (1 - homophily) * n_inter + 1e-9)
+    p_in = min(homophily * t, 1.0)
+    p_out = min((1 - homophily) * t, 1.0)
+
     same = (y[:, None] == y[None, :])
-    P = np.where(same, P_IN, P_OUT)
+    P = np.where(same, p_in, p_out)
     A = (rng.random((n, n)) < P).astype(np.float32)
     A = np.triu(A, 1)                       # garde le triangle supérieur…
     A = A + A.T                             # …puis symétrise (graphe non orienté)
