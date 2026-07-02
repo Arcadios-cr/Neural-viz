@@ -1710,6 +1710,66 @@ def plot_homophily(homophily_values, gcn_acc, mlp_acc, n_classes):
     return fig
 
 
+def hop_distances(A_bin, source):
+    """
+    Distance en nombre de SAUTS de `source` à tous les nœuds (BFS sur le graphe).
+    Renvoie un vecteur d'entiers ; les nœuds non atteignables ont une distance
+    « infinie » (n+1). C'est le champ réceptif : à L couches, un nœud agrège tout
+    ce qui est à distance ≤ L.
+    """
+    n = A_bin.shape[0]
+    # listes d'adjacence (rapide pour le BFS)
+    nbrs = [np.where(A_bin[u] > 0)[0] for u in range(n)]
+    dist = np.full(n, n + 1)
+    dist[source] = 0
+    frontier, d = [source], 0
+    while frontier:
+        d += 1
+        nxt = []
+        for u in frontier:
+            for v in nbrs[u]:
+                if dist[v] > d:
+                    dist[v] = d
+                    nxt.append(v)
+        frontier = nxt
+    return dist
+
+
+def plot_receptive_field(X, y, edges, source, dist, hops):
+    """
+    Gauche : le graphe, nœuds à ≤ `hops` sauts colorés par distance (le reste en
+    gris = hors champ), source entourée. Droite : fraction du graphe atteinte en
+    fonction du nombre de sauts (→ 100 % = le nœud « voit » tout le graphe).
+    """
+    from matplotlib.collections import LineCollection
+    n = len(y)
+    reachable_max = int(dist[dist <= n].max())            # diamètre atteint depuis source
+    in_field = dist <= hops
+
+    fig, (axL, axR) = plt.subplots(1, 2, figsize=(14, 6), gridspec_kw={"width_ratios": [1.4, 1]})
+    segs = [[(X[i, 0], X[i, 1]), (X[j, 0], X[j, 1])] for (i, j) in edges]
+    axL.add_collection(LineCollection(segs, colors="lightgray", linewidths=0.3, alpha=0.5, zorder=1))
+    axL.scatter(X[~in_field, 0], X[~in_field, 1], c="#dddddd", s=16, zorder=2, label="hors champ")
+    sc = axL.scatter(X[in_field, 0], X[in_field, 1], c=dist[in_field], cmap="viridis_r",
+                     vmin=0, vmax=max(hops, 1), s=32, edgecolors="white", linewidths=0.3, zorder=3)
+    plt.colorbar(sc, ax=axL, fraction=0.046, pad=0.04, label="distance (sauts)")
+    axL.scatter([X[source, 0]], [X[source, 1]], s=260, facecolors="none",
+                edgecolors="red", linewidths=2.5, zorder=4)
+    axL.set_title(f"Champ réceptif du nœud {source} à {hops} saut(s) — "
+                  f"{int(in_field.sum())} nœuds atteints")
+    axL.set_xlabel("x₁"); axL.set_ylabel("x₂"); axL.legend(fontsize=8, loc="upper right")
+
+    ls = list(range(0, reachable_max + 1))
+    frac = [100.0 * np.mean(dist <= L) for L in ls]
+    axR.plot(ls, frac, "-o", color="#2196F3")
+    axR.axvline(hops, color="red", ls="--", lw=1.2, label=f"{hops} saut(s)")
+    axR.set_xlabel("nombre de sauts (= couches)"); axR.set_ylabel("% du graphe atteint")
+    axR.set_ylim(0, 105); axR.set_title("Le champ réceptif grandit avec la profondeur")
+    axR.legend(fontsize=8)
+    fig.tight_layout()
+    return fig
+
+
 def _grid(X, res=60):
     """Grille régulière couvrant le nuage de points (pour les régions de décision)."""
     x_min, x_max = X[:, 0].min() - 0.5, X[:, 0].max() + 0.5
@@ -2259,6 +2319,31 @@ if is_graph:
                 f"Graphe à k = {g['k']}. Change **k** ou l'**agrégation** dans la sidebar "
                 "puis ré-entraîne pour voir l'effet sur la frontière."
             )
+
+    # ─── Champ réceptif : jusqu'où l'info d'un nœud se propage ───
+    st.markdown("---")
+    st.markdown("**Champ réceptif — jusqu'où un nœud « voit » selon la profondeur**")
+    st.caption(
+        "Après L couches de graphe, un nœud a agrégé l'information de tous les nœuds à "
+        "≤ L sauts de lui : c'est son champ réceptif. Choisis un nœud et un nombre de "
+        "sauts, et regarde la zone atteinte grandir. C'est le mécanisme derrière le "
+        "sur-lissage : quand le champ couvre tout le graphe, tous les nœuds voient la "
+        "même chose, donc leurs représentations s'effondrent."
+    )
+    rf1, rf2 = st.columns(2)
+    rf_src = rf1.slider("Nœud source", 0, len(y) - 1, 0, key="rf_node")
+    rf_hops = rf2.slider("Nombre de sauts (= couches)", 1, 10, 2, key="rf_hops")
+    rf_dist = hop_distances(A_bin, rf_src)
+    st.pyplot(plot_receptive_field(X, y, edges, rf_src, rf_dist, rf_hops))
+    plt.close("all")
+    reached = 100.0 * np.mean(rf_dist <= rf_hops)
+    full_at = int(rf_dist[rf_dist <= len(y)].max())
+    st.caption(
+        f"À {rf_hops} saut(s), le nœud {rf_src} atteint {reached:.0f} % du graphe. Son "
+        f"champ réceptif est complet à {full_at} sauts (il « voit » alors "
+        f"{100.0 * np.mean(rf_dist <= full_at):.0f} % du graphe). Au-delà, empiler des "
+        "couches ne fait qu'uniformiser les nœuds (sur-lissage)."
+    )
 
     # ─── Sur-lissage (oversmoothing) : effet de la profondeur ───
     if not is_sbm:
