@@ -29,7 +29,21 @@ CLASS_COLORS = ["#2196F3", "#F44336", "#4CAF50", "#FF9800", "#9C27B0"]
 # Configuration de la page
 # ─────────────────────────────────────────────
 st.set_page_config(page_title="Neural-Viz", layout="wide")
-st.title("Visualisation d'un réseau de neurones MLP")
+st.title("Visualisation d'un réseau de neurones")
+with st.expander("À quoi sert cet outil ?"):
+    st.markdown(
+        "Cet outil montre **comment un réseau de neurones transforme des données** pour "
+        "les classer, le tout en 2D pour qu'on puisse tout voir.\n\n"
+        "- **MLP** (perceptron) : choisis un dataset, entraîne, et observe la frontière de "
+        "décision, l'espace latent, les activations, les gradients…\n"
+        "- **Réseau de graphe (GCN / GraphSAGE / GAT)** : on relie les points en un graphe "
+        "et chaque nœud agrège ses voisins. Le fil rouge est **quand et pourquoi** un "
+        "réseau de graphe bat (ou non) un MLP : il ne gagne que si le **graphe porte une "
+        "information que les features n'ont pas** (dataset **SBM**), et empiler trop de "
+        "couches finit par tout **lisser** (sur-lissage).\n\n"
+        "Choisis le **type de modèle** et le **dataset** dans la barre latérale, puis "
+        "entraîne. Les sections « Approfondir » sont repliées par défaut."
+    )
 
 
 # ─────────────────────────────────────────────
@@ -2120,92 +2134,89 @@ if is_graph:
     # ─── Précision / rappel par classe (sur les nœuds de test) ───
     g = st.session_state.gcn
     if g is not None:
-        st.markdown("---")
-        st.markdown("**Précision / rappel par classe (nœuds de test)**")
-        st.caption(
-            "Mêmes métriques que pour le MLP, calculées sur les nœuds de **test** du "
-            "graphe (jamais supervisés). Matrice de confusion (lignes = vraie classe, "
-            "colonnes = prédiction) et précision / rappel / F1 par classe."
-        )
-        from sklearn.metrics import confusion_matrix
-        yt_te, yp_te = g["y"][g["te_idx"]], g["pred"][g["te_idx"]]
-        K_g = int(max(g["y"].max(), g["pred"].max())) + 1     # robuste au binaire (K=2)
-        cm_g = confusion_matrix(yt_te, yp_te, labels=list(range(K_g)))
+        with st.expander("Approfondir — précision / rappel par classe (nœuds de test)"):
+            st.caption(
+                "Mêmes métriques que pour le MLP, calculées sur les nœuds de **test** du "
+                "graphe (jamais supervisés). Matrice de confusion (lignes = vraie classe, "
+                "colonnes = prédiction) et précision / rappel / F1 par classe."
+            )
+            from sklearn.metrics import confusion_matrix
+            yt_te, yp_te = g["y"][g["te_idx"]], g["pred"][g["te_idx"]]
+            K_g = int(max(g["y"].max(), g["pred"].max())) + 1     # robuste au binaire (K=2)
+            cm_g = confusion_matrix(yt_te, yp_te, labels=list(range(K_g)))
 
-        cc1, cc2 = st.columns([1, 1])
-        with cc1:
-            st.pyplot(plot_confusion_matrix(cm_g, f"Confusion — nœuds de test ({agg_label})"))
-            plt.close("all")
-        with cc2:
-            st.table(per_class_table(cm_g))
-        st.caption(
-            "**Précision** d'une classe : parmi les nœuds *prédits* dans cette classe, "
-            "combien sont corrects. **Rappel** : parmi les nœuds *réellement* de cette "
-            "classe, combien sont retrouvés. **Support** : nb de nœuds de test de la classe."
-        )
+            cc1, cc2 = st.columns([1, 1])
+            with cc1:
+                st.pyplot(plot_confusion_matrix(cm_g, f"Confusion — nœuds de test ({agg_label})"))
+                plt.close("all")
+            with cc2:
+                st.table(per_class_table(cm_g))
+            st.caption(
+                "**Précision** d'une classe : parmi les nœuds *prédits* dans cette classe, "
+                "combien sont corrects. **Rappel** : parmi les nœuds *réellement* de cette "
+                "classe, combien sont retrouvés. **Support** : nb de nœuds de test de la classe."
+            )
 
     # ─── Espace latent du réseau de graphe (embeddings via encode()) ───
     g = st.session_state.gcn
     if g is not None and g.get("model") is not None:
-        st.markdown("---")
-        st.markdown(f"**Espace latent ({agg_label}) — ce que « voient » les couches de graphe**")
-        st.caption(
-            "À gauche, l'espace d'entrée (coordonnées brutes). À droite, la "
-            "représentation des nœuds renvoyée par `encode()` (après les couches de "
-            "graphe, avant la tête), projetée en 2D par PCA si sa dimension dépasse 2. "
-            "Plus les classes y sont séparées, plus la tête a un travail facile — c'est "
-            "ce que résume le **score de séparabilité** (silhouette, de -1 à 1)."
-        )
-        st.pyplot(plot_gcn_latent(g["model"], g["X"], g["y"], g["A_hat"]))
-        plt.close("all")
+        with st.expander(f"Approfondir — espace latent ({agg_label}) : ce que « voient » les couches de graphe"):
+            st.caption(
+                "À gauche, l'espace d'entrée (coordonnées brutes). À droite, la "
+                "représentation des nœuds renvoyée par `encode()` (après les couches de "
+                "graphe, avant la tête), projetée en 2D par PCA si sa dimension dépasse 2. "
+                "Plus les classes y sont séparées, plus la tête a un travail facile — c'est "
+                "ce que résume le **score de séparabilité** (silhouette, de -1 à 1)."
+            )
+            st.pyplot(plot_gcn_latent(g["model"], g["X"], g["y"], g["A_hat"]))
+            plt.close("all")
 
     # ─── Attention : sur quels voisins le modèle se concentre (GAT) ───
     g = st.session_state.gcn
     if g is not None and g.get("model") is not None and g.get("agg") == "attention":
-        st.markdown("---")
-        st.markdown("**Attention — sur quels voisins le modèle se concentre**")
-        st.caption(
-            "Chaque nœud du GAT pondère ses voisins par une **attention apprise** α. "
-            "Les arêtes sont colorées/épaissies selon cette attention (moyenne des "
-            "têtes). Choisis un nœud pour voir sur quels voisins il « se concentre ». "
-            "⚠️ L'attention indique *quels voisins pèsent*, mais elle n'est **pas** une "
-            "explication complète du modèle (résultat connu : moyenner les poids "
-            "d'attention ne suffit pas à interpréter un GAT)."
-        )
-        alpha = gcn_attention(g["model"], g["X"], g["A_hat"])
-        focus = st.slider("Nœud à inspecter", 0, len(g["y"]) - 1, 0, key="att_focus")
-        ac1, ac2 = st.columns([3, 2])
-        with ac1:
-            st.pyplot(plot_attention_graph(g["X"], g["y"], g["edges"], alpha,
-                                           g["A_bin"], focus=focus))
-            plt.close("all")
-        with ac2:
-            st.pyplot(plot_node_attention_bars(focus, alpha, g["A_bin"], g["y"]))
-            plt.close("all")
-
-        # Insight quantitatif : attention moyenne même classe vs classe différente,
-        # comparée à l'uniforme (1/degré) → diagnostique si le GAT « sélectionne » vraiment.
-        same = diff = 0.0
-        ns = nd = 0
-        for i, j in g["edges"]:
-            a = (alpha[i, j] + alpha[j, i]) / 2
-            if g["y"][i] == g["y"][j]:
-                same += a; ns += 1
-            else:
-                diff += a; nd += 1
-        if ns and nd:
-            sm, dm = same / ns, diff / nd
-            uni = 1.0 / (g["A_bin"].sum(1).mean() + 1)   # attention uniforme moyenne ≈ 1/(degré+1)
-            if sm > 1.15 * dm:
-                verdict = "→ le GAT **privilégie** nettement les voisins de même classe."
-            else:
-                verdict = (f"→ l'attention est **quasi uniforme** (≈ 1/degré = {uni:.3f}) : "
-                           "sur ces données 2D, le GAT se comporte presque comme la "
-                           "**moyenne (GCN)** — c'est pourquoi *GAT ≈ GCN* ici.")
+        with st.expander("Approfondir — attention : sur quels voisins le modèle se concentre"):
             st.caption(
-                f"Attention moyenne par arête : **même classe** {sm:.3f} vs "
-                f"**classe différente** {dm:.3f}. {verdict}"
+                "Chaque nœud du GAT pondère ses voisins par une **attention apprise** α. "
+                "Les arêtes sont colorées/épaissies selon cette attention (moyenne des "
+                "têtes). Choisis un nœud pour voir sur quels voisins il « se concentre ». "
+                "⚠️ L'attention indique *quels voisins pèsent*, mais elle n'est **pas** une "
+                "explication complète du modèle (résultat connu : moyenner les poids "
+                "d'attention ne suffit pas à interpréter un GAT)."
             )
+            alpha = gcn_attention(g["model"], g["X"], g["A_hat"])
+            focus = st.slider("Nœud à inspecter", 0, len(g["y"]) - 1, 0, key="att_focus")
+            ac1, ac2 = st.columns([3, 2])
+            with ac1:
+                st.pyplot(plot_attention_graph(g["X"], g["y"], g["edges"], alpha,
+                                               g["A_bin"], focus=focus))
+                plt.close("all")
+            with ac2:
+                st.pyplot(plot_node_attention_bars(focus, alpha, g["A_bin"], g["y"]))
+                plt.close("all")
+
+            # Insight quantitatif : attention moyenne même classe vs classe différente,
+            # comparée à l'uniforme (1/degré) → diagnostique si le GAT « sélectionne » vraiment.
+            same = diff = 0.0
+            ns = nd = 0
+            for i, j in g["edges"]:
+                a = (alpha[i, j] + alpha[j, i]) / 2
+                if g["y"][i] == g["y"][j]:
+                    same += a; ns += 1
+                else:
+                    diff += a; nd += 1
+            if ns and nd:
+                sm, dm = same / ns, diff / nd
+                uni = 1.0 / (g["A_bin"].sum(1).mean() + 1)   # attention uniforme moyenne ≈ 1/(degré+1)
+                if sm > 1.15 * dm:
+                    verdict = "→ le GAT **privilégie** nettement les voisins de même classe."
+                else:
+                    verdict = (f"→ l'attention est **quasi uniforme** (≈ 1/degré = {uni:.3f}) : "
+                               "sur ces données 2D, le GAT se comporte presque comme la "
+                               "**moyenne (GCN)** — c'est pourquoi *GAT ≈ GCN* ici.")
+                st.caption(
+                    f"Attention moyenne par arête : **même classe** {sm:.3f} vs "
+                    f"**classe différente** {dm:.3f}. {verdict}"
+                )
 
     # ─── SBM : le résultat — réseau de graphe (structure) vs MLP (features seules) ───
     g = st.session_state.gcn
@@ -2321,29 +2332,28 @@ if is_graph:
             )
 
     # ─── Champ réceptif : jusqu'où l'info d'un nœud se propage ───
-    st.markdown("---")
-    st.markdown("**Champ réceptif — jusqu'où un nœud « voit » selon la profondeur**")
-    st.caption(
-        "Après L couches de graphe, un nœud a agrégé l'information de tous les nœuds à "
-        "≤ L sauts de lui : c'est son champ réceptif. Choisis un nœud et un nombre de "
-        "sauts, et regarde la zone atteinte grandir. C'est le mécanisme derrière le "
-        "sur-lissage : quand le champ couvre tout le graphe, tous les nœuds voient la "
-        "même chose, donc leurs représentations s'effondrent."
-    )
-    rf1, rf2 = st.columns(2)
-    rf_src = rf1.slider("Nœud source", 0, len(y) - 1, 0, key="rf_node")
-    rf_hops = rf2.slider("Nombre de sauts (= couches)", 1, 10, 2, key="rf_hops")
-    rf_dist = hop_distances(A_bin, rf_src)
-    st.pyplot(plot_receptive_field(X, y, edges, rf_src, rf_dist, rf_hops))
-    plt.close("all")
-    reached = 100.0 * np.mean(rf_dist <= rf_hops)
-    full_at = int(rf_dist[rf_dist <= len(y)].max())
-    st.caption(
-        f"À {rf_hops} saut(s), le nœud {rf_src} atteint {reached:.0f} % du graphe. Son "
-        f"champ réceptif est complet à {full_at} sauts (il « voit » alors "
-        f"{100.0 * np.mean(rf_dist <= full_at):.0f} % du graphe). Au-delà, empiler des "
-        "couches ne fait qu'uniformiser les nœuds (sur-lissage)."
-    )
+    with st.expander("Approfondir — champ réceptif : jusqu'où un nœud « voit » selon la profondeur"):
+        st.caption(
+            "Après L couches de graphe, un nœud a agrégé l'information de tous les nœuds à "
+            "≤ L sauts de lui : c'est son champ réceptif. Choisis un nœud et un nombre de "
+            "sauts, et regarde la zone atteinte grandir. C'est le mécanisme derrière le "
+            "sur-lissage : quand le champ couvre tout le graphe, tous les nœuds voient la "
+            "même chose, donc leurs représentations s'effondrent."
+        )
+        rf1, rf2 = st.columns(2)
+        rf_src = rf1.slider("Nœud source", 0, len(y) - 1, 0, key="rf_node")
+        rf_hops = rf2.slider("Nombre de sauts (= couches)", 1, 10, 2, key="rf_hops")
+        rf_dist = hop_distances(A_bin, rf_src)
+        st.pyplot(plot_receptive_field(X, y, edges, rf_src, rf_dist, rf_hops))
+        plt.close("all")
+        reached = 100.0 * np.mean(rf_dist <= rf_hops)
+        full_at = int(rf_dist[rf_dist <= len(y)].max())
+        st.caption(
+            f"À {rf_hops} saut(s), le nœud {rf_src} atteint {reached:.0f} % du graphe. Son "
+            f"champ réceptif est complet à {full_at} sauts (il « voit » alors "
+            f"{100.0 * np.mean(rf_dist <= full_at):.0f} % du graphe). Au-delà, empiler des "
+            "couches ne fait qu'uniformiser les nœuds (sur-lissage)."
+        )
 
     # ─── Sur-lissage (oversmoothing) : effet de la profondeur ───
     if not is_sbm:
