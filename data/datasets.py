@@ -71,6 +71,33 @@ def make_overlap(
     return _shuffle(X, y, rng)
 
 
+def make_density(
+    n_samples: int = 200,
+    noise: float = 0.2,
+    seed: int = 42,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Densité asymétrique : bleu TRÈS DENSE / rouge TRÈS CLAIRSEMÉ, avec une zone
+    de chevauchement.
+
+    Classe 0 (bleue) : 75 % des points sur une gaussienne resserrée en (-0.7, 0)
+    → beaucoup de points sur une petite surface (forte densité locale).
+    Classe 1 (rouge) : 25 % des points sur une gaussienne très étalée en (0.9, 0)
+    → peu de points sur une grande surface (faible densité locale). L'étalement
+    du rouge recouvre le nuage bleu → dans la zone de chevauchement, les deux
+    classes coexistent aux mêmes positions ; ce qui les distingue localement,
+    c'est la densité des points (dense = plutôt bleu, clairsemé = plutôt rouge).
+    """
+    rng = np.random.default_rng(seed)
+    n_dense = int(n_samples * 0.75)
+    n_sparse = n_samples - n_dense
+    X0 = rng.normal(loc=[-0.7, 0.0], scale=0.35 + 0.3 * noise, size=(n_dense, 2))
+    X1 = rng.normal(loc=[0.9, 0.0],  scale=1.0 + 0.6 * noise, size=(n_sparse, 2))
+    X = np.vstack([X0, X1])
+    y = np.array([0] * n_dense + [1] * n_sparse)
+    return _shuffle(X, y, rng)
+
+
 def make_blobs(
     n_samples: int = 200,
     noise: float = 0.5,
@@ -362,6 +389,7 @@ def make_spirals(
 DATASETS = {
     "Two Gaussians":      make_gaussians,
     "Overlap":            make_overlap,
+    "Density":            make_density,
     "Blobs":              make_blobs,
     "Classification":     make_classif,
     "Gaussian Quantiles": make_quantiles,
