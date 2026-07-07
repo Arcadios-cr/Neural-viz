@@ -9,7 +9,7 @@ from models.mlp import MLP
 from models.mlp_bottleneck import MLPBottleneck
 from models.gcn import GCN
 from data.datasets import DATASETS, MULTICLASS_CAPABLE, get_dataset, split_dataset, to_dataloader
-from data.graphs import build_knn, knn_edges, normalize_adj
+from data.graphs import build_knn, build_radius, knn_edges, normalize_adj
 from data.sbm import make_sbm
 
 # Dataset spécial : le graphe est FOURNI (communautés), les features 2D sont faibles.
@@ -1428,8 +1428,8 @@ def gcn_masks(n):
     return perm[:n_tr], perm[n_tr:n_tr + n_val], perm[n_tr + n_val:]
 
 
-def plot_gcn_graph(X, y, edges):
-    """Dessine le graphe k-NN : arêtes grises + nœuds colorés par vraie classe."""
+def plot_gcn_graph(X, y, edges, title=None):
+    """Dessine le graphe de voisinage : arêtes grises + nœuds colorés par vraie classe."""
     from matplotlib.collections import LineCollection
     fig, ax = plt.subplots(figsize=(7, 6))
     segs = [[(X[i, 0], X[i, 1]), (X[j, 0], X[j, 1])] for (i, j) in edges]
@@ -1438,7 +1438,7 @@ def plot_gcn_graph(X, y, edges):
         m = y == c
         ax.scatter(X[m, 0], X[m, 1], c=CLASS_COLORS[c % len(CLASS_COLORS)], s=28,
                    edgecolors="white", linewidths=0.4, zorder=2, label=f"Classe {c}")
-    ax.set_title(f"Graphe k-NN (k={knn_k}) — {len(edges)} arêtes")
+    ax.set_title(title or f"Graphe k-NN (k={knn_k}) — {len(edges)} arêtes")
     ax.set_xlabel("x₁"); ax.set_ylabel("x₂"); ax.legend(fontsize=8)
     return fig
 
@@ -1796,27 +1796,39 @@ def _grid(X, res=60):
     return xx, yy, np.c_[xx.ravel(), yy.ravel()].astype(np.float32)
 
 
-def gcn_decision_regions(gcn_model, X, A_hat, k, res=60):
+def gcn_decision_regions(gcn_model, X, A_hat, k, res=60, radius=None):
     """
     Régions de décision d'un GCN. Comme un GCN classe des NŒUDS (pas des points
     arbitraires), on insère la grille dans le graphe : chaque point de la grille
-    est relié à ses k plus proches voisins du dataset (arêtes dirigées grille →
-    dataset, donc les nœuds du dataset gardent EXACTEMENT leur représentation
-    d'entraînement). On lit ensuite la prédiction du GCN sur les nœuds-grille.
+    est relié à ses k plus proches voisins du dataset (ou, si ``radius`` est
+    donné, aux points du dataset à distance < radius — au moins le plus proche),
+    par des arêtes dirigées grille → dataset, donc les nœuds du dataset gardent
+    EXACTEMENT leur représentation d'entraînement. On lit ensuite la prédiction
+    du GCN sur les nœuds-grille.
     """
     from sklearn.neighbors import NearestNeighbors
     xx, yy, G = _grid(X, res)
     n, g = len(X), len(G)
-    idx = NearestNeighbors(n_neighbors=k).fit(X).kneighbors(G, return_distance=False)
+    nn_fit = NearestNeighbors(n_neighbors=k).fit(X)
     N = n + g
     A = torch.zeros((N, N), dtype=torch.float32)
     A[:n, :n] = A_hat                                       # bloc dataset = Â d'entraînement
-    w = 1.0 / (k + 1)
-    rows = torch.tensor(np.repeat(np.arange(g), k) + n)
-    cols = torch.tensor(idx.ravel())
-    A[rows, cols] = w                                       # grille → voisins dataset
-    diag = torch.arange(n, N)
-    A[diag, diag] = w                                       # self-loops des nœuds-grille
+    if radius is None:
+        idx = nn_fit.kneighbors(G, return_distance=False)
+        w = 1.0 / (k + 1)
+        rows = torch.tensor(np.repeat(np.arange(g), k) + n)
+        cols = torch.tensor(idx.ravel())
+        A[rows, cols] = w                                   # grille → voisins dataset
+        diag = torch.arange(n, N)
+        A[diag, diag] = w                                   # self-loops des nœuds-grille
+    else:
+        nbrs = nn_fit.radius_neighbors(G, radius=radius, return_distance=False)
+        nn1 = nn_fit.kneighbors(G, n_neighbors=1, return_distance=False)
+        for i, nb in enumerate(nbrs):
+            nb = nb if len(nb) else nn1[i]                  # nœud-grille jamais orphelin
+            w = 1.0 / (len(nb) + 1)
+            A[n + i, torch.tensor(np.asarray(nb, dtype=np.int64))] = w
+            A[n + i, n + i] = w
     Xaug = torch.tensor(np.vstack([X, G]), dtype=torch.float32)
     gcn_model.eval()
     with torch.no_grad():
@@ -2060,23 +2072,65 @@ if is_graph:
         )
     else:
         st.caption(
-            f"On construit un graphe k-NN sur le nuage de points : {_agg_desc}, puis une "
+            f"On construit un graphe de voisinage sur le nuage de points (k-NN ou rayon, "
+            f"au choix ci-dessous) : {_agg_desc}, puis une "
             "tête MLP classe chaque nœud. Entraînement **transductif** : un seul graphe sur "
             "tous les points, perte calculée sur les nœuds d'entraînement (les nœuds de test "
             "participent à la propagation, mais leur label n'est pas vu)."
         )
 
-    # SBM : graphe FOURNI (communautés) ; sinon graphe k-NN construit sur les coordonnées.
+    # SBM : graphe FOURNI (communautés) ; sinon graphe construit sur les coordonnées,
+    # par k-NN (degré ~constant) ou par RAYON (le degré reflète la densité locale).
+    use_radius, radius_r = False, 0.40
+    if not is_sbm:
+        bcol1, bcol2 = st.columns([1, 1])
+        with bcol1:
+            graph_build = st.radio(
+                "Construction du graphe", ["k-NN (k voisins)", "rayon (r)"],
+                horizontal=True,
+                help=(
+                    "**k-NN** : chaque point est relié à ses k plus proches voisins — tout "
+                    "le monde reçoit ~k voisins, le degré n'encode PAS la densité locale. "
+                    "**Rayon** : on relie tout ce qui est à distance < r — beaucoup de "
+                    "voisins en zone dense, peu (voire zéro) en zone clairsemée : le degré "
+                    "reflète la densité."
+                ),
+            )
+            use_radius = graph_build.startswith("rayon")
+        with bcol2:
+            radius_r = st.slider(
+                "Rayon r", 0.05, 2.0, 0.40, 0.05, disabled=not use_radius,
+                help=(
+                    "Distance de connexion du graphe par rayon. Trop petit → le graphe "
+                    "s'émiette (nœuds isolés) ; trop grand → tout est relié à tout "
+                    "(sur-lissage assuré)."
+                ),
+            )
     if is_sbm:
         A_hat, A_bin = normalize_adj(A_sbm), A_sbm
+    elif use_radius:
+        A_hat, A_bin = build_radius(X, r=radius_r)
     else:
         A_hat, A_bin = build_knn(X, k=knn_k)
     edges = knn_edges(A_bin)
+    if not is_sbm:
+        deg_g = A_bin.sum(1)
+        per_class = "  ·  ".join(
+            f"classe {c} : {deg_g[y == c].mean():.1f}" for c in range(n_classes_eff)
+        )
+        st.caption(
+            f"Degré moyen : **{deg_g.mean():.1f}** ({per_class})  ·  nœuds isolés : "
+            f"{int((deg_g == 0).sum())}. Le k-NN égalise les degrés entre zones denses et "
+            "clairsemées ; le rayon les fait refléter la densité locale."
+        )
 
+    graph_title = ("Graphe communautaire (SBM)" if is_sbm else
+                   f"Graphe par rayon (r={radius_r:g}) — {len(edges)} arêtes" if use_radius
+                   else f"Graphe k-NN (k={knn_k}) — {len(edges)} arêtes")
     gcol1, gcol2 = st.columns(2)
     with gcol1:
         st.markdown("**Graphe communautaire (SBM)**" if is_sbm else "**Graphe des voisins**")
-        st.pyplot(plot_gcn_graph(X, y, edges))
+        st.pyplot(plot_gcn_graph(X, y, edges, title=graph_title))
         plt.close("all")
 
     with gcol2:
@@ -2122,6 +2176,7 @@ if is_graph:
                 acc_test=float((pred[te_idx] == y[te_idx]).mean()),
                 acc_train=float((pred[tr_idx] == y[tr_idx]).mean()),
                 hist=hist, model=gcn, A_hat=A_hat, A_bin=A_bin, k=knn_k, agg=gcn_agg,
+                build=("sbm" if is_sbm else "radius" if use_radius else "knn"), r=radius_r,
             )
 
         g = st.session_state.gcn
@@ -2305,7 +2360,9 @@ if is_graph:
         )
         if st.checkbox("Calculer les régions de décision (un peu lent)"):
             with st.spinner("Calcul des régions…"):
-                reg_gcn = gcn_decision_regions(g["model"], g["X"], g["A_hat"], g["k"])
+                reg_gcn = gcn_decision_regions(
+                    g["model"], g["X"], g["A_hat"], g["k"],
+                    radius=(g["r"] if g.get("build") == "radius" else None))
                 out_dim = n_classes_eff if is_multiclass else 1
                 torch.manual_seed(int(weight_seed))
                 mlp_cmp = MLP(2, [neurons_per_layer, neurons_per_layer], out_dim,

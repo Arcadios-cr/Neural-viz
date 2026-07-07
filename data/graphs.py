@@ -39,6 +39,30 @@ def build_knn(X: np.ndarray, k: int = 6):
     return torch.tensor(A_hat, dtype=torch.float32), A_bin
 
 
+def build_radius(X: np.ndarray, r: float = 0.4):
+    """
+    Construit le graphe par RAYON (epsilon-ball) : deux points sont reliés si
+    leur distance est inférieure à r. Renvoie (A_hat, A_bin) comme ``build_knn``.
+
+    Différence fondamentale avec le k-NN : le nombre de voisins n'est PAS fixé.
+    Dans une zone dense, un point a beaucoup de voisins ; dans une zone
+    clairsemée, peu (voire aucun : le nœud reste isolé, la self-loop de la
+    normalisation garde le calcul valide). Le DEGRÉ reflète donc la densité
+    locale, que le k-NN efface (k voisins pour tout le monde).
+    """
+    from sklearn.neighbors import radius_neighbors_graph
+    n = X.shape[0]
+    A = radius_neighbors_graph(X, radius=r, mode="connectivity", include_self=False).toarray()
+    A_bin = np.maximum(A, A.T)             # déjà symétrique en théorie ; on garantit
+
+    A = A_bin + np.eye(n)
+    deg = A.sum(axis=1)
+    d_inv_sqrt = 1.0 / np.sqrt(deg)
+    A_hat = d_inv_sqrt[:, None] * A * d_inv_sqrt[None, :]
+
+    return torch.tensor(A_hat, dtype=torch.float32), A_bin
+
+
 def knn_edges(A_bin: np.ndarray):
     """Liste des arêtes (i, j) avec i < j, pour le tracé du graphe."""
     iu, ju = np.where(np.triu(A_bin, k=1) > 0)
