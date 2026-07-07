@@ -1870,6 +1870,102 @@ def plot_regions_compare(X, y, reg_gcn, reg_mlp, acc_gcn, acc_mlp, left_label="G
     return fig
 
 
+def radius_density_study(r, n_seeds=3):
+    """
+    MLP vs GCN (k-NN) vs GCN (rayon) sur le dataset courant, même protocole que
+    l'entraînement du mode graphe (transductif, full-batch), moyenné sur n_seeds.
+    Renvoie {nom: (acc_moy, acc_std, rappel_classe1_moy)} sur les nœuds de test.
+    """
+    n = len(y)
+    tr, _, te = gcn_masks(n)
+    m_tr = torch.tensor(np.isin(np.arange(n), tr))
+    Xt = torch.tensor(X, dtype=torch.float32)
+    yt = (torch.tensor(y, dtype=torch.long) if is_multiclass
+          else torch.tensor(y, dtype=torch.float32).view(-1, 1))
+    crit = nn.CrossEntropyLoss() if is_multiclass else nn.BCEWithLogitsLoss()
+    od = n_classes_eff if is_multiclass else 1
+    A_rad, Ab_rad = build_radius(X, r=r)
+    graphs = {"GCN (k-NN)": build_knn(X, k=knn_k)[0],
+              "GCN (rayon)": A_rad}
+    # Degré du graphe par rayon (normalisé) donné en 3e feature : même info de
+    # densité que le graphe, mais sous une forme que le réseau lit sans agrégation.
+    deg_r = Ab_rad.sum(1)
+    deg_feat = (deg_r - deg_r.mean()) / (deg_r.std() + 1e-9)
+    X_deg = torch.tensor(np.hstack([X, deg_feat[:, None]]), dtype=torch.float32)
+    res = {name: []
+           for name in ["MLP (features)"] + list(graphs) + ["MLP + degré (rayon)"]}
+
+    def _scores(p):
+        rec1 = float((p[te][y[te] == 1] == 1).mean()) if (y[te] == 1).any() else float("nan")
+        return float((p[te] == y[te]).mean()), rec1
+
+    for ws in range(n_seeds):
+        for name, Ah in graphs.items():
+            torch.manual_seed(ws)
+            gm = GCN(input_dim=2, gcn_layers=[neurons_per_layer] * gcn_layers_n,
+                     head_layers=[max(neurons_per_layer // 2, 4)], output_dim=od,
+                     activation=activation, aggregation=gcn_agg, heads=gat_heads,
+                     use_batchnorm=use_batchnorm)
+            opt = torch.optim.Adam(gm.parameters(), lr=learning_rate)
+            torch.manual_seed(ws)
+            for _ in range(n_epochs):
+                gm.train(); opt.zero_grad()
+                crit(gm(Xt, Ah)[m_tr], yt[m_tr]).backward(); opt.step()
+            gm.eval()
+            with torch.no_grad():
+                o = gm(Xt, Ah).numpy()
+            res[name].append(_scores(o.argmax(1) if is_multiclass
+                                     else (o[:, 0] > 0).astype(int)))
+        torch.manual_seed(ws)
+        ml = MLP(2, [neurons_per_layer, neurons_per_layer], od, activation=activation)
+        opt = torch.optim.Adam(ml.parameters(), lr=learning_rate)
+        torch.manual_seed(ws)
+        for _ in range(n_epochs):
+            ml.train(); opt.zero_grad()
+            crit(ml(Xt[tr]), yt[tr]).backward(); opt.step()
+        ml.eval()
+        with torch.no_grad():
+            o = ml(Xt).numpy()
+        res["MLP (features)"].append(_scores(o.argmax(1) if is_multiclass
+                                             else (o[:, 0] > 0).astype(int)))
+        torch.manual_seed(ws)
+        md = MLP(3, [neurons_per_layer, neurons_per_layer], od, activation=activation)
+        opt = torch.optim.Adam(md.parameters(), lr=learning_rate)
+        torch.manual_seed(ws)
+        for _ in range(n_epochs):
+            md.train(); opt.zero_grad()
+            crit(md(X_deg[tr]), yt[tr]).backward(); opt.step()
+        md.eval()
+        with torch.no_grad():
+            o = md(X_deg).numpy()
+        res["MLP + degré (rayon)"].append(_scores(o.argmax(1) if is_multiclass
+                                                  else (o[:, 0] > 0).astype(int)))
+
+    return {name: (float(np.mean([a for a, _ in v])), float(np.std([a for a, _ in v])),
+                   float(np.mean([rc for _, rc in v])))
+            for name, v in res.items()}
+
+
+def plot_radius_density(res, r):
+    """Barres : accuracy test (± std sur les seeds) et rappel classe 1, par modèle."""
+    names = list(res)
+    palette = {"MLP (features)": "#9C27B0", "GCN (k-NN)": "#4CAF50",
+               "GCN (rayon)": "#FF9800", "MLP + degré (rayon)": "#607D8B"}
+    fig, axes = plt.subplots(1, 2, figsize=(13, 4.5))
+    for ax, vi, err, title in [
+        (axes[0], 0, [res[nm][1] * 100 for nm in names], "Accuracy test"),
+        (axes[1], 2, None, "Rappel de la classe 1 (la clairsemée sur Density)"),
+    ]:
+        ax.bar(range(len(names)), [res[nm][vi] * 100 for nm in names],
+               yerr=err, capsize=4, color=[palette.get(nm, "#607D8B") for nm in names])
+        ax.set_xticks(range(len(names)))
+        ax.set_xticklabels([nm.replace(" (", "\n(") for nm in names], fontsize=8)
+        ax.set_ylim(0, 100); ax.set_ylabel("%"); ax.set_title(title)
+    fig.suptitle(f"Le graphe par rayon (r={r:g}) rend-il la densité au réseau de graphe ?")
+    fig.tight_layout()
+    return fig
+
+
 # ─────────────────────────────────────────────
 # Initialisation de st.session_state
 # ─────────────────────────────────────────────
@@ -2387,9 +2483,42 @@ if is_graph:
             st.pyplot(plot_regions_compare(g["X"], g["y"], reg_gcn, reg_mlp,
                                            g["acc_test"], acc_mlp, left_label=agg_label))
             plt.close("all")
+            _gdesc = (f"rayon r = {g['r']:g}" if g.get("build") == "radius"
+                      else f"k = {g['k']}")
             st.caption(
-                f"Graphe à k = {g['k']}. Change **k** ou l'**agrégation** dans la sidebar "
-                "puis ré-entraîne pour voir l'effet sur la frontière."
+                f"Graphe à {_gdesc}. Change la **construction du graphe**, **k**/**r** ou "
+                "l'**agrégation**, puis ré-entraîne pour voir l'effet sur la frontière."
+            )
+
+    # ─── Étude : le graphe par rayon rend-il la densité au réseau de graphe ? ───
+    if not is_sbm:
+        st.markdown("---")
+        st.markdown("**Étude — densité : graphe par rayon vs k-NN**")
+        st.caption(
+            "Le k-NN donne ~k voisins à tout le monde : le **degré** n'encode pas la "
+            "densité locale (sur Density : degré ≈ 7 pour les deux classes alors que la "
+            "densité réelle diffère d'un facteur 4). Le graphe par **rayon**, lui, remet "
+            "la densité dans le degré. Mais l'agrégation **moyenne normalisée** (Kipf) "
+            "divise justement par le degré — elle est conçue pour gommer ces écarts... "
+            "L'étude entraîne, sur le dataset courant, un MLP, un GCN sur graphe k-NN et "
+            "un GCN sur graphe par rayon (mêmes réglages, 3 seeds d'initialisation)."
+        )
+        if st.checkbox("Lancer l'étude densité (MLP vs k-NN vs rayon vs degré-feature, 3 seeds)",
+                       key="radius_study"):
+            with st.spinner("Entraînement des quatre modèles (3 seeds)…"):
+                res_rd = radius_density_study(radius_r)
+            st.pyplot(plot_radius_density(res_rd, radius_r))
+            plt.close("all")
+            best = max(res_rd, key=lambda nm: res_rd[nm][0])
+            st.caption(
+                f"Meilleure accuracy test : **{best}** ({res_rd[best][0] * 100:.1f} %). "
+                "Grille de lecture : si « GCN (rayon) » ne dépasse pas « GCN (k-NN) », le "
+                "degré est bien revenu dans le graphe mais l'agrégation moyenne **ne sait "
+                "pas le lire** — la normalisation de Kipf divise précisément par le degré. "
+                "La barre « MLP + degré » reçoit la même info de densité en *feature* : si "
+                "elle seule décolle, l'info était là et c'est l'agrégation qui la gomme. "
+                "Si rien ne décolle, la densité est **redondante avec la position** sur ce "
+                "dataset (cas Density : la zone dense est aussi la zone de gauche)."
             )
 
     # ─── Champ réceptif : jusqu'où l'info d'un nœud se propage ───
