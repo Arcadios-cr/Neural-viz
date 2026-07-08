@@ -98,6 +98,47 @@ def make_density(
     return _shuffle(X, y, rng)
 
 
+def make_structure(
+    n_samples: int = 200,
+    noise: float = 0.2,
+    seed: int = 42,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Structure géométrique : bleu rangé en COLONNES (verticales, à gauche),
+    rouge rangé en LIGNES (horizontales, à droite), avec une zone de
+    chevauchement au centre (retour encadrant, S11).
+
+    Classe 0 (bleue) : 5 colonnes verticales, x de -1.8 à 0.2, y étalé.
+    Classe 1 (rouge) : 5 lignes horizontales, y de -1.6 à 1.6, x de -0.5 à 2.0.
+    Dans la bande centrale (x entre -0.5 et 0.2 environ), les deux motifs
+    coexistent : ce qui distingue localement les classes est l'ARRANGEMENT
+    des points (alignés verticalement = bleu, horizontalement = rouge).
+    `noise` épaissit les traits (jitter perpendiculaire aux alignements).
+    """
+    rng = np.random.default_rng(seed)
+    n_per_class = n_samples // 2
+    jitter = 0.04 + 0.08 * noise
+
+    parts_X, parts_y = [], []
+    counts = [n_per_class // 5 + (1 if i < n_per_class % 5 else 0) for i in range(5)]
+    # Colonnes bleues : x quasi fixe (jitter), y uniforme
+    for cx, m in zip(np.linspace(-1.8, 0.2, 5), counts):
+        xs = cx + rng.normal(scale=jitter, size=m)
+        ys = rng.uniform(-2.0, 2.0, size=m)
+        parts_X.append(np.stack([xs, ys], axis=1))
+        parts_y.append(np.zeros(m, dtype=int))
+    # Lignes rouges : y quasi fixe (jitter), x uniforme
+    for ry, m in zip(np.linspace(-1.6, 1.6, 5), counts):
+        xs = rng.uniform(-0.5, 2.0, size=m)
+        ys = ry + rng.normal(scale=jitter, size=m)
+        parts_X.append(np.stack([xs, ys], axis=1))
+        parts_y.append(np.ones(m, dtype=int))
+
+    X = np.vstack(parts_X)
+    y = np.concatenate(parts_y)
+    return _shuffle(X, y, rng)
+
+
 def make_blobs(
     n_samples: int = 200,
     noise: float = 0.5,
@@ -390,6 +431,7 @@ DATASETS = {
     "Two Gaussians":      make_gaussians,
     "Overlap":            make_overlap,
     "Density":            make_density,
+    "Structure":          make_structure,
     "Blobs":              make_blobs,
     "Classification":     make_classif,
     "Gaussian Quantiles": make_quantiles,
