@@ -20,6 +20,7 @@ Chaque script :
 |---|---|---|
 | `density_study.py` | effet de la **densité** de points (courbe d'apprentissage) | `density_learning_curve.png` |
 | `generalization_study.py` | **capacité** (largeur), **batch size**, **régularisation** (dropout vs weight decay) | `capacity.png`, `batch_size.png`, `regularization.png` |
+| `neighborhood_info_study.py` | **quand l'info du voisinage aide** (S11 : chevauchement + densité / structure) — MLP vs GCN (k-NN, rayon, max) vs info voisinage en feature, en **transductif** | `neighborhood_info.png` |
 
 ## Lancer
 
