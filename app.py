@@ -49,7 +49,7 @@ with st.expander("À quoi sert cet outil ?"):
 # ─────────────────────────────────────────────
 # Sidebar — paramètres
 # ─────────────────────────────────────────────
-st.sidebar.header("Architecture du réseau")
+st.sidebar.header("Modèle")
 
 model_type = st.sidebar.radio(
     "Type de modèle",
@@ -62,195 +62,140 @@ model_type = st.sidebar.radio(
     ),
 )
 is_graph = model_type.startswith("Réseau")
-knn_k = st.sidebar.slider(
-    "Graphe — voisins k", 2, 15, 6,
-    disabled=not is_graph,
-    help="Nombre de voisins reliés à chaque point dans le graphe k-NN (taille du voisinage).",
-)
-gcn_layers_n = st.sidebar.slider(
-    "Graphe — couches (profondeur)", 1, 4, 2,
-    disabled=not is_graph,
-    help=(
-        "Nombre de couches de graphe (répétitions de l'agrégation). Avec 1 seule, le "
-        "champ réceptif est d'un seul saut ; 2 suffisent en général. Trop de couches "
-        "→ sur-lissage (oversmoothing)."
-    ),
-)
-gcn_aggregation = st.sidebar.selectbox(
-    "Agrégation des voisins", ["moyenne (GCN)", "max (GraphSAGE)", "attention (GAT)"],
-    disabled=not is_graph,
-    help=(
-        "Comment un nœud combine ses voisins — c'est ce qui distingue les "
-        "architectures. **Moyenne** (Kipf/GCN) : poids fixes, tous les voisins "
-        "égaux. **Max** (GraphSAGE) : on garde la plus forte réponse (détecteur de "
-        "motif). **Attention** (GAT) : le nœud APPREND combien chaque voisin compte "
-        "(multi-têtes) — il « se concentre sur l'info pertinente »."
-    ),
-)
-gcn_agg = {"moyenne": "mean", "max": "max", "attention": "attention"}[gcn_aggregation.split()[0]]
-# Nom de l'architecture classique correspondante (pour les affichages)
-agg_label = {"mean": "GCN", "max": "GraphSAGE", "attention": "GAT"}[gcn_agg]
-gat_heads = st.sidebar.slider(
-    "Attention — têtes", 1, 8, 4,
-    disabled=not (is_graph and gcn_agg == "attention"),
-    help=(
-        "Nombre de mécanismes d'attention indépendants calculés en parallèle puis "
-        "moyennés (plusieurs façons de pondérer les voisins → plus stable). Actif "
-        "seulement avec l'agrégation « attention »."
-    ),
-)
+# ─── Réglages spécifiques au réseau de graphe (repliés en mode MLP) ───
+with st.sidebar.expander("Réglages du réseau de graphe", expanded=is_graph):
+    knn_k = st.slider(
+        "Voisins k", 2, 15, 6,
+        help="Nombre de voisins reliés à chaque point dans le graphe k-NN (taille du voisinage).",
+    )
+    gcn_layers_n = st.slider(
+        "Couches de graphe (profondeur)", 1, 4, 2,
+        help=(
+            "Nombre de couches de graphe (répétitions de l'agrégation). Avec 1 seule, le "
+            "champ réceptif est d'un seul saut ; 2 suffisent en général. Trop de couches "
+            "→ sur-lissage (oversmoothing)."
+        ),
+    )
+    gcn_aggregation = st.selectbox(
+        "Agrégation des voisins", ["moyenne (GCN)", "max (GraphSAGE)", "attention (GAT)"],
+        help=(
+            "Comment un nœud combine ses voisins — c'est ce qui distingue les "
+            "architectures. **Moyenne** (Kipf/GCN) : poids fixes. **Max** (GraphSAGE) : "
+            "la plus forte réponse (détecteur de motif). **Attention** (GAT) : le nœud "
+            "APPREND combien chaque voisin compte (multi-têtes)."
+        ),
+    )
+    gcn_agg = {"moyenne": "mean", "max": "max", "attention": "attention"}[gcn_aggregation.split()[0]]
+    # Nom de l'architecture classique correspondante (pour les affichages)
+    agg_label = {"mean": "GCN", "max": "GraphSAGE", "attention": "GAT"}[gcn_agg]
+    gat_heads = st.slider(
+        "Attention — têtes", 1, 8, 4,
+        disabled=(gcn_agg != "attention"),
+        help=(
+            "Nombre de mécanismes d'attention indépendants calculés en parallèle puis "
+            "moyennés. Actif seulement avec l'agrégation « attention »."
+        ),
+    )
 
-n_hidden_layers = st.sidebar.slider(
-    "Nombre de couches cachées", 1, 8, 1,
-    help=(
-        "Jusqu'à 8 couches. Augmenter la profondeur permet d'observer "
-        "l'aggravation exponentielle du vanishing gradient (visible via "
-        "« Suivre les gradients par couche »)."
-    ),
-)
-neurons_per_layer = st.sidebar.slider("Neurones par couche cachée", 2, 64, 8)
-control_first_layer = st.sidebar.checkbox(
-    "Contrôler la 1ère couche séparément",
-    value=False,
-    help=(
-        "Chaque neurone de la 1ère couche calcule une droite de séparation "
-        "dans le plan d'entrée. Plus de neurones en 1ère couche = plus de "
-        "« plans » pour découper des frontières complexes (ex : damier). "
-        "Visible via « Afficher les poids appris » (droites de la 1ère couche)."
-    ),
-)
-first_layer_neurons = st.sidebar.slider(
-    "Neurones de la 1ère couche", 2, 128, 16,
-    disabled=not control_first_layer,
-    help="Nombre de droites de séparation apprises directement sur l'entrée.",
-)
+# ─── Architecture commune (MLP et réseau de graphe) ───
+st.sidebar.subheader("Architecture")
+neurons_per_layer = st.sidebar.slider("Neurones par couche", 2, 64, 8)
 activation = st.sidebar.selectbox("Fonction d'activation", ["relu", "tanh", "sigmoid"])
 use_batchnorm = st.sidebar.checkbox(
     "Utiliser BatchNorm", value=False,
     help=(
-        "Normalise les activations couche par couche (entraînement plus stable, "
-        "échelles homogènes). S'applique au MLP comme au GCN : en mode GCN, une "
-        "BatchNorm est insérée après chaque couche de convolution de graphe."
+        "Normalise les activations couche par couche (entraînement plus stable). "
+        "S'applique au MLP comme au réseau de graphe."
     ),
-)
-dropout_rate = st.sidebar.slider(
-    "Dropout (régularisation)",
-    0.0, 0.7, 0.0, step=0.05,
-    help=(
-        "Probabilité d'éteindre aléatoirement chaque neurone à chaque pas "
-        "d'entraînement. Réduit l'overfitting. 0 = désactivé. "
-        "Valeurs typiques : 0.1 à 0.3."
-    ),
-)
-use_bottleneck = st.sidebar.checkbox(
-    "Espace latent (bottleneck)",
-    value=False,
-    help=(
-        "Insère un goulot d'étranglement au milieu du réseau. "
-        "Permet de visualiser comment le réseau 'redessine' les données."
-    ),
-)
-bottleneck_dim = st.sidebar.radio(
-    "Dimension de l'espace latent",
-    [1, 2, 3],
-    index=1,
-    horizontal=True,
-    help=(
-        "1D : le réseau doit tout résumer en UN seul nombre — test extrême "
-        "(le problème est-il assez simple pour tenir sur une ligne ?).\n"
-        "2D : scatter plot statique (matplotlib).\n"
-        "3D : scatter plot interactif rotatif (Plotly)."
-    ),
-    disabled=not use_bottleneck,
-)
-funnel_encoder = st.sidebar.checkbox(
-    "Encoder en entonnoir",
-    value=False,
-    help=(
-        "Au lieu d'avoir toutes les couches encoder de la même taille, "
-        "les tailles décroissent : [n, n/2, n/4, ...]."
-    ),
-    disabled=not use_bottleneck,
-)
-head_layers = st.sidebar.slider(
-    "Tête (décodeur) — nombre de couches",
-    1, 4, 2,
-    help=(
-        "Nombre de couches cachées après le bottleneck. Par défaut la tête "
-        "est plus petite que l'encoder, comme un vrai décodeur."
-    ),
-    disabled=not use_bottleneck,
-)
-head_neurons = st.sidebar.slider(
-    "Tête — neurones par couche",
-    2, 64, 16,
-    help="Nombre de neurones dans chaque couche du décodeur.",
-    disabled=not use_bottleneck,
 )
 
-st.sidebar.header("Visualisation")
-viz_mode = st.sidebar.radio(
-    "Affichage de la sortie du réseau",
-    ["Logits (sortie brute)", "Probabilités (sigmoid / softmax)"],
-    index=0,
-    help=(
-        "Logits : sortie brute du réseau.\n"
-        "Probabilités : sigmoid en binaire ; en multi-classes, softmax → "
-        "l'opacité de la frontière indique la confiance du réseau (pâle = "
-        "le réseau hésite, saturé = il est sûr)."
-    ),
-)
-live_training = st.sidebar.checkbox("Entraînement en temps réel", value=True)
-track_gradients = st.sidebar.checkbox(
-    "Suivre les gradients par couche",
-    value=False,
-    help=(
-        "Capture la norme du gradient de chaque couche à chaque époque. "
-        "Permet de diagnostiquer les vanishing gradients (gradients qui "
-        "s'écrasent vers les couches d'entrée) et les exploding gradients. "
-        "Très parlant en comparant ReLU vs sigmoid/tanh sur un réseau profond."
-    ),
-)
-boundary_refresh = st.sidebar.slider(
-    "Rafraîchir la frontière toutes les N époques",
-    1, 50, 10,
-    help="Plus petit = plus fluide mais plus lent. Plus grand = plus rapide.",
-)
+# ─── Réglages spécifiques au MLP (repliés en mode graphe) ───
+with st.sidebar.expander("Réglages du MLP", expanded=not is_graph):
+    n_hidden_layers = st.slider(
+        "Nombre de couches cachées", 1, 8, 1,
+        help=(
+            "Jusqu'à 8 couches. Augmenter la profondeur permet d'observer "
+            "l'aggravation du vanishing gradient (via « Suivre les gradients par couche »)."
+        ),
+    )
+    control_first_layer = st.checkbox(
+        "Contrôler la 1ère couche séparément", value=False,
+        help=(
+            "Chaque neurone de la 1ère couche calcule une droite de séparation dans le "
+            "plan d'entrée. Plus de neurones = plus de « plans » pour des frontières "
+            "complexes (ex : damier)."
+        ),
+    )
+    first_layer_neurons = st.slider(
+        "Neurones de la 1ère couche", 2, 128, 16,
+        disabled=not control_first_layer,
+        help="Nombre de droites de séparation apprises directement sur l'entrée.",
+    )
+    dropout_rate = st.slider(
+        "Dropout (régularisation)", 0.0, 0.7, 0.0, step=0.05,
+        help=(
+            "Probabilité d'éteindre aléatoirement chaque neurone à chaque pas "
+            "d'entraînement. Réduit l'overfitting. 0 = désactivé."
+        ),
+    )
+    use_bottleneck = st.checkbox(
+        "Espace latent (bottleneck)", value=False,
+        help=(
+            "Insère un goulot d'étranglement au milieu du réseau, pour visualiser "
+            "comment le réseau « redessine » les données."
+        ),
+    )
+    bottleneck_dim = st.radio(
+        "Dimension de l'espace latent", [1, 2, 3], index=1, horizontal=True,
+        disabled=not use_bottleneck,
+        help="1D : tout résumer sur une ligne. 2D : scatter statique. 3D : interactif (Plotly).",
+    )
+    funnel_encoder = st.checkbox(
+        "Encoder en entonnoir", value=False, disabled=not use_bottleneck,
+        help="Les tailles des couches encoder décroissent : [n, n/2, n/4, ...].",
+    )
+    head_layers = st.slider(
+        "Tête (décodeur) — nombre de couches", 1, 4, 2, disabled=not use_bottleneck,
+        help="Nombre de couches cachées après le bottleneck.",
+    )
+    head_neurons = st.slider(
+        "Tête — neurones par couche", 2, 64, 16, disabled=not use_bottleneck,
+        help="Nombre de neurones dans chaque couche du décodeur.",
+    )
+
+# ─── Visualisation (spécifique au MLP, repliée en mode graphe) ───
+with st.sidebar.expander("Visualisation (MLP)", expanded=not is_graph):
+    viz_mode = st.radio(
+        "Affichage de la sortie du réseau",
+        ["Logits (sortie brute)", "Probabilités (sigmoid / softmax)"],
+        index=0,
+        help=(
+            "Logits : sortie brute du réseau.\n"
+            "Probabilités : sigmoid en binaire ; en multi-classes, softmax → "
+            "l'opacité de la frontière indique la confiance du réseau."
+        ),
+    )
+    live_training = st.checkbox("Entraînement en temps réel", value=True)
+    track_gradients = st.checkbox(
+        "Suivre les gradients par couche",
+        value=False,
+        help=(
+            "Capture la norme du gradient de chaque couche à chaque époque → diagnostic "
+            "des vanishing / exploding gradients (parlant en ReLU vs sigmoid/tanh profond)."
+        ),
+    )
+    boundary_refresh = st.slider(
+        "Rafraîchir la frontière toutes les N époques",
+        1, 50, 10,
+        help="Plus petit = plus fluide mais plus lent.",
+    )
 
 st.sidebar.header("Entraînement")
 n_epochs = st.sidebar.slider("Nombre d'époques (max)", 10, 500, 100)
-optimizer_name = st.sidebar.selectbox(
-    "Optimiseur",
-    ["Adam", "SGD"],
-    index=0,
-    help=(
-        "Adam : adaptatif, converge vite, mais masque les vanishing gradients "
-        "(il normalise les gradients par leur historique).\n"
-        "SGD : descente de gradient simple, le pas est directement proportionnel "
-        "à la norme du gradient → idéal pour observer les vanishing gradients."
-    ),
-)
 learning_rate = st.sidebar.select_slider(
     "Taux d'apprentissage",
     options=[0.001, 0.005, 0.01, 0.05, 0.1],
     value=0.01,
-)
-batch_size = st.sidebar.slider(
-    "Batch size", 8, 128, 32,
-    help=(
-        "Taille des lots. Petits batch = gradient plus bruité → minima plus "
-        "« plats » → souvent meilleure généralisation. Gros batch = plus rapide "
-        "mais peut moins bien généraliser."
-    ),
-)
-weight_decay = st.sidebar.select_slider(
-    "Weight decay (régularisation L2)",
-    options=[0.0, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1],
-    value=0.0,
-    help=(
-        "Pénalise les poids trop grands → régularisation. Alternative ou "
-        "complément au dropout pour réduire l'overfitting. 0 = désactivé."
-    ),
 )
 
 st.sidebar.subheader("Split train / validation / test")
@@ -259,19 +204,39 @@ val_ratio = st.sidebar.slider("Ratio validation", 0.1, 0.4, 0.2, step=0.05)
 test_ratio = max(0.0, 1.0 - train_ratio - val_ratio)
 st.sidebar.caption(f"Ratio test (calculé) : **{test_ratio:.2f}**")
 
-st.sidebar.subheader("Early stopping")
-use_early_stopping = st.sidebar.checkbox("Activer l'early stopping", value=True)
-patience = st.sidebar.slider(
-    "Patience (époques sans amélioration)", 1, 50, 15,
-    disabled=not use_early_stopping,
-    help="L'entraînement s'arrête si la val loss ne s'améliore plus pendant N époques.",
-)
-min_delta = st.sidebar.select_slider(
-    "Min delta (amélioration minimale)",
-    options=[0.0, 1e-5, 1e-4, 1e-3, 1e-2],
-    value=1e-4,
-    disabled=not use_early_stopping,
-)
+# ─── Réglages d'entraînement spécifiques au MLP (repliés en mode graphe) ───
+with st.sidebar.expander("Entraînement — réglages MLP", expanded=not is_graph):
+    optimizer_name = st.selectbox(
+        "Optimiseur", ["Adam", "SGD"], index=0,
+        help=(
+            "Adam : adaptatif, converge vite, mais masque les vanishing gradients.\n"
+            "SGD : le pas est proportionnel à la norme du gradient → idéal pour observer "
+            "les vanishing gradients."
+        ),
+    )
+    batch_size = st.slider(
+        "Batch size", 8, 128, 32,
+        help=(
+            "Petits batch = gradient plus bruité → minima plus « plats » → souvent "
+            "meilleure généralisation. Gros batch = plus rapide."
+        ),
+    )
+    weight_decay = st.select_slider(
+        "Weight decay (régularisation L2)",
+        options=[0.0, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1], value=0.0,
+        help="Pénalise les poids trop grands → régularisation (alternative au dropout). 0 = désactivé.",
+    )
+    use_early_stopping = st.checkbox("Activer l'early stopping", value=True)
+    patience = st.slider(
+        "Patience (époques sans amélioration)", 1, 50, 15,
+        disabled=not use_early_stopping,
+        help="L'entraînement s'arrête si la val loss ne s'améliore plus pendant N époques.",
+    )
+    min_delta = st.select_slider(
+        "Min delta (amélioration minimale)",
+        options=[0.0, 1e-5, 1e-4, 1e-3, 1e-2], value=1e-4,
+        disabled=not use_early_stopping,
+    )
 
 st.sidebar.header("Dataset")
 dataset_name = st.sidebar.selectbox(
