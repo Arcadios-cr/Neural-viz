@@ -12,6 +12,11 @@ chacune une architecture classique :
   - ``"mean"``  → moyenne normalisée à poids FIXES  → **GCN** (Kipf & Welling, 2017)
                   H' = σ( Â · H · W ), Â = adjacence normalisée (self-loops inclus).
   - ``"max"``   → max par dimension (agrégateur apprenable) → **GraphSAGE** (Hamilton, 2017).
+  - ``"sum"``   → somme NON normalisée sur les voisins → **GIN** (Xu et al., 2019).
+                  La seule agrégation qui « sait compter » les voisins : la magnitude de
+                  la sortie croît avec le degré, donc l'info de DENSITÉ locale survit
+                  (la moyenne la divise, le max la plafonne). Variante minimale : somme
+                  self-loop incluse (le (1+ε)·h_i de l'article avec ε = 0).
   - ``"attention"`` → somme pondérée par une attention APPRISE multi-têtes → **GAT**
                   (Veličković et al., 2018) : le nœud apprend combien chaque voisin compte.
 
@@ -40,6 +45,8 @@ class GCNLayer(nn.Module):
       Â = adjacence normalisée (self-loops inclus) ;
     - ``"max"`` (GraphSAGE) : pour chaque nœud, MAX dimension par dimension des
       features transformées de ses voisins (self-loop inclus) ;
+    - ``"sum"`` (GIN) : SOMME non normalisée des features transformées des voisins
+      (self-loop incluse, ε = 0) — la magnitude reflète le degré du nœud ;
     - ``"attention"`` (GAT) : somme pondérée par une attention apprise multi-têtes
       e_ij = LeakyReLU(aᵀ[W·h_i ‖ W·h_j]), α = softmax sur les voisins, les K têtes
       étant MOYENNÉES → sortie de dimension ``out_features`` (comme mean/max).
@@ -73,6 +80,12 @@ class GCNLayer(nn.Module):
         Z = self.lin(H)                              # transformation linéaire des features
         if self.aggregation == "mean":
             return A @ Z                             # moyenne pondérée (Â inclut les self-loops)
+        if self.aggregation == "sum":
+            # somme NON normalisée sur le motif non-nul (self-loops incluses) :
+            # contrairement à la moyenne, la magnitude croît avec le degré → le
+            # réseau peut « compter » ses voisins (GIN). BatchNorm recommandée
+            # (les magnitudes varient beaucoup d'un nœud à l'autre).
+            return (A != 0).float() @ Z
 
         # ─── max-pool (GraphSAGE) : max sur les voisins (motif non-nul de A) ───
         rows, cols = (A != 0).nonzero(as_tuple=True)  # arête i←j : j voisin de i
@@ -111,7 +124,7 @@ class GCN(nn.Module):
     """
     Réseau de graphe configurable : quelques couches de graphe (agrégation au choix),
     puis une tête MLP par nœud. Selon ``aggregation``, se comporte comme un GCN
-    (mean), un GraphSAGE (max) ou un GAT (attention).
+    (mean), un GraphSAGE (max), un GIN (sum) ou un GAT (attention).
 
     Paramètres
     ----------
@@ -119,7 +132,8 @@ class GCN(nn.Module):
     gcn_layers  : tailles des couches de graphe (ex. [16, 16]).
     head_layers : tailles des couches de la tête MLP (ex. [16]).
     output_dim  : 1 (binaire) ou K (multi-classes).
-    aggregation : ``"mean"`` (GCN) · ``"max"`` (GraphSAGE) · ``"attention"`` (GAT).
+    aggregation : ``"mean"`` (GCN) · ``"max"`` (GraphSAGE) · ``"sum"`` (GIN) ·
+                  ``"attention"`` (GAT).
     heads       : nombre de têtes d'attention (utilisé seulement si attention ;
                   les têtes sont moyennées → dimension inchangée).
     use_batchnorm : BatchNorm après chaque couche de graphe (avant l'activation).

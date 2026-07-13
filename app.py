@@ -77,17 +77,21 @@ with st.sidebar.expander("Réglages du réseau de graphe", expanded=is_graph):
         ),
     )
     gcn_aggregation = st.selectbox(
-        "Agrégation des voisins", ["moyenne (GCN)", "max (GraphSAGE)", "attention (GAT)"],
+        "Agrégation des voisins",
+        ["moyenne (GCN)", "max (GraphSAGE)", "somme (GIN)", "attention (GAT)"],
         help=(
             "Comment un nœud combine ses voisins — c'est ce qui distingue les "
             "architectures. **Moyenne** (Kipf/GCN) : poids fixes. **Max** (GraphSAGE) : "
-            "la plus forte réponse (détecteur de motif). **Attention** (GAT) : le nœud "
+            "la plus forte réponse (détecteur de motif). **Somme** (GIN) : somme non "
+            "normalisée — la seule qui « sait compter » les voisins, donc lire le degré "
+            "(la densité locale d'un graphe par rayon). **Attention** (GAT) : le nœud "
             "APPREND combien chaque voisin compte (multi-têtes)."
         ),
     )
-    gcn_agg = {"moyenne": "mean", "max": "max", "attention": "attention"}[gcn_aggregation.split()[0]]
+    gcn_agg = {"moyenne": "mean", "max": "max", "somme": "sum",
+               "attention": "attention"}[gcn_aggregation.split()[0]]
     # Nom de l'architecture classique correspondante (pour les affichages)
-    agg_label = {"mean": "GCN", "max": "GraphSAGE", "attention": "GAT"}[gcn_agg]
+    agg_label = {"mean": "GCN", "max": "GraphSAGE", "sum": "GIN", "attention": "GAT"}[gcn_agg]
     gat_heads = st.slider(
         "Attention — têtes", 1, 8, 4,
         disabled=(gcn_agg != "attention"),
@@ -1383,7 +1387,11 @@ def build_gcn_model():
     head_layers = [max(neurons_per_layer // 2, 4)]
     # SBM : on force la BatchNorm — sur des features faibles, un petit réseau peut
     # s'effondrer en multi-classes (prédire une seule classe) ; la BN stabilise.
-    bn = use_batchnorm or is_sbm
+    # Somme (GIN) : BN forcée aussi — la magnitude des sorties croît avec le degré
+    # (c'est voulu, c'est l'info !), sans normalisation l'entraînement devient
+    # instable (mesuré : ±9 pts entre seeds sans BN, ±1 avec ; l'article GIN met
+    # une BatchNorm après chaque couche).
+    bn = use_batchnorm or is_sbm or gcn_agg == "sum"
     return GCN(input_dim=2, gcn_layers=gcn_layers, head_layers=head_layers,
                output_dim=out_dim, activation=activation, aggregation=gcn_agg,
                heads=gat_heads, use_batchnorm=bn)
@@ -2120,6 +2128,9 @@ if is_graph:
     _agg_desc = {
         "mean": "chaque nœud agrège ses voisins par une **moyenne** à poids fixes (GCN)",
         "max": "chaque nœud agrège ses voisins par un **max** par dimension (GraphSAGE)",
+        "sum": "chaque nœud **somme** ses voisins sans normaliser (GIN) — la magnitude "
+               "reflète le degré, donc la densité locale (BatchNorm activée d'office : "
+               "elle stabilise ces magnitudes très variables)",
         "attention": "chaque nœud pondère ses voisins par une **attention apprise** "
                      "multi-têtes (GAT)",
     }[gcn_agg]
