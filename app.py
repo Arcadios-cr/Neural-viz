@@ -1870,7 +1870,8 @@ def radius_density_study(r, n_seeds=3):
     deg_feat = (deg_r - deg_r.mean()) / (deg_r.std() + 1e-9)
     X_deg = torch.tensor(np.hstack([X, deg_feat[:, None]]), dtype=torch.float32)
     res = {name: []
-           for name in ["MLP (features)"] + list(graphs) + ["MLP + degré (rayon)"]}
+           for name in ["MLP (features)"] + list(graphs)
+           + ["GCN somme (rayon)", "MLP + degré (rayon)"]}
 
     def _scores(p):
         rec1 = float((p[te][y[te] == 1] == 1).mean()) if (y[te] == 1).any() else float("nan")
@@ -1893,6 +1894,23 @@ def radius_density_study(r, n_seeds=3):
                 o = gm(Xt, Ah).numpy()
             res[name].append(_scores(o.argmax(1) if is_multiclass
                                      else (o[:, 0] > 0).astype(int)))
+        # Somme (GIN) sur le graphe rayon : l'agrégation qui « sait compter » les
+        # voisins, donc lire le degré (BN forcée, cf. build_gcn_model).
+        torch.manual_seed(ws)
+        gs = GCN(input_dim=2, gcn_layers=[neurons_per_layer] * gcn_layers_n,
+                 head_layers=[max(neurons_per_layer // 2, 4)], output_dim=od,
+                 activation=activation, aggregation="sum", heads=gat_heads,
+                 use_batchnorm=True)
+        opt = torch.optim.Adam(gs.parameters(), lr=learning_rate)
+        torch.manual_seed(ws)
+        for _ in range(n_epochs):
+            gs.train(); opt.zero_grad()
+            crit(gs(Xt, A_rad)[m_tr], yt[m_tr]).backward(); opt.step()
+        gs.eval()
+        with torch.no_grad():
+            o = gs(Xt, A_rad).numpy()
+        res["GCN somme (rayon)"].append(_scores(o.argmax(1) if is_multiclass
+                                                else (o[:, 0] > 0).astype(int)))
         torch.manual_seed(ws)
         ml = MLP(2, [neurons_per_layer, neurons_per_layer], od, activation=activation)
         opt = torch.optim.Adam(ml.parameters(), lr=learning_rate)
@@ -1927,7 +1945,8 @@ def plot_radius_density(res, r):
     """Barres : accuracy test (± std sur les seeds) et rappel classe 1, par modèle."""
     names = list(res)
     palette = {"MLP (features)": "#9C27B0", "GCN (k-NN)": "#4CAF50",
-               "GCN (rayon)": "#FF9800", "MLP + degré (rayon)": "#607D8B"}
+               "GCN (rayon)": "#FF9800", "GCN somme (rayon)": "#E91E63",
+               "MLP + degré (rayon)": "#607D8B"}
     fig, axes = plt.subplots(1, 2, figsize=(13, 4.5))
     for ax, vi, err, title in [
         (axes[0], 0, [res[nm][1] * 100 for nm in names], "Accuracy test"),
@@ -2483,9 +2502,9 @@ if is_graph:
             "L'étude entraîne, sur le dataset courant, un MLP, un GCN sur graphe k-NN et "
             "un GCN sur graphe par rayon (mêmes réglages, 3 seeds d'initialisation)."
         )
-        if st.checkbox("Lancer l'étude densité (MLP vs k-NN vs rayon vs degré-feature, 3 seeds)",
-                       key="radius_study"):
-            with st.spinner("Entraînement des quatre modèles (3 seeds)…"):
+        if st.checkbox("Lancer l'étude densité (MLP vs k-NN vs rayon vs somme vs degré-feature, "
+                       "3 seeds)", key="radius_study"):
+            with st.spinner("Entraînement des cinq modèles (3 seeds)…"):
                 res_rd = radius_density_study(radius_r)
             st.pyplot(plot_radius_density(res_rd, radius_r))
             plt.close("all")
@@ -2493,12 +2512,14 @@ if is_graph:
             st.caption(
                 f"Meilleure accuracy test : **{best}** ({res_rd[best][0] * 100:.1f} %). "
                 "Grille de lecture : si « GCN (rayon) » ne dépasse pas « GCN (k-NN) », le "
-                "degré est bien revenu dans le graphe mais l'agrégation moyenne **ne sait "
+                "degré est bien revenu dans le graphe mais l'agrégation courante **ne sait "
                 "pas le lire** — la normalisation de Kipf divise précisément par le degré. "
-                "La barre « MLP + degré » reçoit la même info de densité en *feature* : si "
-                "elle seule décolle, l'info était là et c'est l'agrégation qui la gomme. "
-                "Si rien ne décolle, la densité est **redondante avec la position** sur ce "
-                "dataset (cas Density : la zone dense est aussi la zone de gauche)."
+                "« GCN somme (rayon) » remplace la moyenne par une **somme** (GIN, BN "
+                "forcée) : la seule agrégation qui *compte* les voisins — si la densité "
+                "est l'info, cette barre doit rejoindre « MLP + degré », qui reçoit la "
+                "même info en *feature* (la borne de ce qui est lisible). Si rien ne "
+                "décolle, la densité est **redondante avec la position** sur ce dataset "
+                "(cas Density : la zone dense est aussi la zone de gauche)."
             )
 
     # ─── Champ réceptif : jusqu'où l'info d'un nœud se propage ───
