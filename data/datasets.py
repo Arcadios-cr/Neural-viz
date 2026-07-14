@@ -98,6 +98,38 @@ def make_density(
     return _shuffle(X, y, rng)
 
 
+def make_decoupled_density(
+    n_samples: int = 200,
+    noise: float = 0.2,
+    seed: int = 42,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Densité DÉCOUPLÉE de la position : micro-amas bleus très denses éparpillés
+    sur tout le plan, et rouge clairsemé uniforme par-dessus.
+
+    Les deux classes couvrent le même territoire → la position seule ne dit
+    RIEN (un MLP retombe à la baseline majoritaire). La densité locale dit
+    tout : amas serré = bleu, isolé = rouge. C'est le « juge de paix » du test
+    de densité : tout modèle qui dépasse la baseline lit forcément la densité
+    — ce qui exige un graphe qui l'encode (rayon) ET une agrégation qui la lit
+    (somme). `noise` règle le rayon des micro-amas.
+    """
+    rng = np.random.default_rng(seed)
+    n_blue = int(n_samples * 0.75)
+    n_red = n_samples - n_blue
+    n_clumps = 12
+    centers = rng.uniform(-1.8, 1.8, size=(n_clumps, 2))
+    counts = [n_blue // n_clumps + (1 if i < n_blue % n_clumps else 0)
+              for i in range(n_clumps)]
+    scale = 0.05 + 0.15 * noise
+    X0 = np.vstack([rng.normal(loc=c, scale=scale, size=(m, 2))
+                    for c, m in zip(centers, counts)])
+    X1 = rng.uniform(-2.0, 2.0, size=(n_red, 2))
+    X = np.vstack([X0, X1])
+    y = np.array([0] * n_blue + [1] * n_red)
+    return _shuffle(X, y, rng)
+
+
 def make_structure(
     n_samples: int = 200,
     noise: float = 0.2,
@@ -431,6 +463,7 @@ DATASETS = {
     "Two Gaussians":      make_gaussians,
     "Overlap":            make_overlap,
     "Density":            make_density,
+    "Density découplée":  make_decoupled_density,
     "Structure":          make_structure,
     "Blobs":              make_blobs,
     "Classification":     make_classif,
