@@ -19,15 +19,19 @@ k = 6, Adam lr 0.01, 100 époques, transductif 60/20/20, 3 seeds d'init) :
   - GCN agrégation moyenne sur graphe k-NN (degré ~constant) ;
   - GCN agrégation moyenne sur graphe par RAYON (degré = densité locale) ;
   - GCN agrégation max (GraphSAGE) sur k-NN (sensible à l'étalement directionnel) ;
+  - GCN agrégation SOMME (GIN) sur graphe par RAYON, BatchNorm forcée : la seule
+    agrégation qui « compte » les voisins, donc qui peut lire le degré ;
   - MLP + « info voisinage » en 3e feature (degré du graphe rayon pour la
     densité, anisotropie |dy|-|dx| des voisins k-NN pour la structure) :
     borne de ce que le voisinage PEUT apporter si on sait le lire.
 
-Loi attendue (fil des semaines 9-11) : le voisinage n'aide que si (a) il porte
-une info ABSENTE des features (position) et (b) l'architecture sait la LIRE —
-l'agrégation moyenne normalisée (Kipf) gomme le degré, et la moyenne compense
-les décalages symétriques (arrangement). D'où la barre « MLP + feature » qui
-domine dès que l'info existe, et des GCN qui n'en profitent que partiellement.
+Loi (fil des semaines 9-12) : le voisinage n'aide que si (a) il porte une info
+ABSENTE des features (position) et (b) l'architecture sait la LIRE — l'agrégation
+moyenne normalisée (Kipf) gomme le degré, et la moyenne compense les décalages
+symétriques (arrangement). La barre « MLP + feature » (la borne) domine dès que
+l'info existe ; la SOMME est la variante d'architecture qui remplit la condition
+(b) pour la densité : sur le scénario découplé, elle rejoint la borne (~96 %) là
+où moyenne et max restent à la baseline (~77 %).
 
 NOTE protocole : contrairement aux autres études de ce dossier (test set fixe
 de 1000 points), on est ici en TRANSDUCTIF (un seul graphe, split de nœuds
@@ -68,6 +72,7 @@ PALETTE = {
     "GCN mean (k-NN)":      "#4CAF50",
     "GCN mean (rayon)":     "#FF9800",
     "GCN max (k-NN)":       "#FF5722",
+    "GCN somme (rayon)":    "#E91E63",
     "MLP + info voisinage": "#607D8B",
 }
 
@@ -118,12 +123,12 @@ def run_scenario(X, y, r, feature_kind):
     feat = neighborhood_feature(X, feature_kind, Ab_rad)
     X_feat = np.hstack([X, feat[:, None]]).astype(np.float32)
 
-    def gcn(Ah, agg, ws):
+    def gcn(Ah, agg, ws, bn=False):
         Xt = torch.tensor(X, dtype=torch.float32)
         torch.manual_seed(ws)
         gm = GCN(input_dim=2, gcn_layers=[NEUR] * 2, head_layers=[max(NEUR // 2, 4)],
                  output_dim=1, activation="relu", aggregation=agg, heads=4,
-                 use_batchnorm=False)
+                 use_batchnorm=bn)
         opt = torch.optim.Adam(gm.parameters(), lr=LR)
         torch.manual_seed(ws)
         for _ in range(EPOCHS):
@@ -151,6 +156,9 @@ def run_scenario(X, y, r, feature_kind):
         "GCN mean (k-NN)":      lambda ws: gcn(A_knn, "mean", ws),
         "GCN mean (rayon)":     lambda ws: gcn(A_rad, "mean", ws),
         "GCN max (k-NN)":       lambda ws: gcn(A_knn, "max", ws),
+        # Somme (GIN) : la seule agrégation qui « compte » les voisins — BN forcée
+        # (sans elle : instable, ±9 pts entre seeds ; cf. l'article GIN).
+        "GCN somme (rayon)":    lambda ws: gcn(A_rad, "sum", ws, bn=True),
         "MLP + info voisinage": lambda ws: mlp(X_feat, ws),
     }
     out = {}
