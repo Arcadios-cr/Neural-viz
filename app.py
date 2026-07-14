@@ -36,7 +36,7 @@ with st.expander("À quoi sert cet outil ?"):
         "les classer, le tout en 2D pour qu'on puisse tout voir.\n\n"
         "- **MLP** (perceptron) : choisis un dataset, entraîne, et observe la frontière de "
         "décision, l'espace latent, les activations, les gradients…\n"
-        "- **Réseau de graphe (GCN / GraphSAGE / GAT)** : on relie les points en un graphe "
+        "- **Réseau de graphe (GCN / GraphSAGE / GIN / GAT)** : on relie les points en un graphe "
         "et chaque nœud agrège ses voisins. Le fil rouge est **quand et pourquoi** un "
         "réseau de graphe bat (ou non) un MLP : il ne gagne que si le **graphe porte une "
         "information que les features n'ont pas** (dataset **SBM**), et empiler trop de "
@@ -53,7 +53,7 @@ st.sidebar.header("Modèle")
 
 model_type = st.sidebar.radio(
     "Type de modèle",
-    ["MLP (perceptron)", "Réseau de graphe (GCN / GraphSAGE / GAT)"],
+    ["MLP (perceptron)", "Réseau de graphe (GCN / GraphSAGE / GIN / GAT)"],
     help=(
         "MLP : perceptron classique (chaque point traité indépendamment).\n"
         "Réseau de graphe : construit un graphe k-NN et agrège les voisins. Selon "
@@ -1378,7 +1378,7 @@ def plot_rotation_robustness(model, X_test, y_test):
 
 
 # ─────────────────────────────────────────────
-# Réseau de graphe — modèle, masques et visualisations (GCN / GraphSAGE / GAT)
+# Réseau de graphe — modèle, masques et visualisations (GCN / GraphSAGE / GIN / GAT)
 # ─────────────────────────────────────────────
 def build_gcn_model():
     """Construit le réseau de graphe selon la sidebar (agrégation, têtes, profondeur)."""
@@ -2141,7 +2141,7 @@ with col2:
 
 
 # ─────────────────────────────────────────────
-# Mode réseau de graphe (GCN / GraphSAGE / GAT) : graphe k-NN, transductif
+# Mode réseau de graphe (GCN / GraphSAGE / GIN / GAT) : graphe k-NN, transductif
 # ─────────────────────────────────────────────
 if is_graph:
     _agg_desc = {
