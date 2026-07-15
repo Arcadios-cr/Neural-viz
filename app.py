@@ -9,7 +9,7 @@ from models.mlp import MLP
 from models.mlp_bottleneck import MLPBottleneck
 from models.gcn import GCN
 from data.datasets import DATASETS, MULTICLASS_CAPABLE, get_dataset, split_dataset, to_dataloader
-from data.graphs import build_knn, build_radius, knn_edges, normalize_adj
+from data.graphs import build_knn, build_radius, knn_edges, knn_edge_stats, normalize_adj
 from data.sbm import make_sbm
 
 # Dataset spécial : le graphe est FOURNI (communautés), les features 2D sont faibles.
@@ -1396,7 +1396,8 @@ def build_gcn_model():
     # instable (mesuré : ±9 pts entre seeds sans BN, ±1 avec ; l'article GIN met
     # une BatchNorm après chaque couche).
     bn = use_batchnorm or is_sbm or gcn_agg == "sum"
-    return GCN(input_dim=2, gcn_layers=gcn_layers, head_layers=head_layers,
+    # input_dim suit X_in : 2 (coordonnées) ou 4 (+ features géométriques d'arête)
+    return GCN(input_dim=X_in.shape[1], gcn_layers=gcn_layers, head_layers=head_layers,
                output_dim=out_dim, activation=activation, aggregation=gcn_agg,
                heads=gat_heads, use_batchnorm=bn)
 
@@ -1443,7 +1444,16 @@ def plot_gcn_pred(X, y, pred, te_idx):
     return fig
 
 
-def plot_gcn_latent(model, X, y, A_hat):
+def _geo_augment(P, X_ref, geo):
+    """Ajoute (longueur d'arête normalisée, verticalité) aux points P si geo=(k, mu, sd)."""
+    if not geo:
+        return P.astype(np.float32)
+    k, mu, sd = geo
+    mlen, vert = knn_edge_stats(P, X_ref, k=k)
+    return np.hstack([P, ((mlen - mu) / sd)[:, None], vert[:, None]]).astype(np.float32)
+
+
+def plot_gcn_latent(model, X, y, A_hat, Xin=None):
     """
     Espace latent du réseau de graphe : les embeddings de nœuds renvoyés par
     ``encode()`` (après les couches de graphe, AVANT la tête). Affichage côte à côte de
@@ -1454,7 +1464,8 @@ def plot_gcn_latent(model, X, y, A_hat):
     from sklearn.metrics import silhouette_score
     model.eval()
     with torch.no_grad():
-        Z = model.encode(torch.tensor(X, dtype=torch.float32), A_hat).numpy()
+        Z = model.encode(torch.tensor(Xin if Xin is not None else X,
+                                      dtype=torch.float32), A_hat).numpy()
 
     if Z.shape[1] == 2:
         emb, xl, yl = Z, "z₁", "z₂"
@@ -1777,7 +1788,7 @@ def _grid(X, res=60):
     return xx, yy, np.c_[xx.ravel(), yy.ravel()].astype(np.float32)
 
 
-def gcn_decision_regions(gcn_model, X, A_hat, k, res=60, radius=None):
+def gcn_decision_regions(gcn_model, X, A_hat, k, res=60, radius=None, Xin=None, geo=None):
     """
     Régions de décision d'un GCN. Comme un GCN classe des NŒUDS (pas des points
     arbitraires), on insère la grille dans le graphe : chaque point de la grille
@@ -1810,7 +1821,8 @@ def gcn_decision_regions(gcn_model, X, A_hat, k, res=60, radius=None):
             w = 1.0 / (len(nb) + 1)
             A[n + i, torch.tensor(np.asarray(nb, dtype=np.int64))] = w
             A[n + i, n + i] = w
-    Xaug = torch.tensor(np.vstack([X, G]), dtype=torch.float32)
+    base = Xin if Xin is not None else X
+    Xaug = torch.tensor(np.vstack([base, _geo_augment(G, X, geo)]), dtype=torch.float32)
     gcn_model.eval()
     with torch.no_grad():
         out = gcn_model(Xaug, A).numpy()[n:]
@@ -1818,12 +1830,12 @@ def gcn_decision_regions(gcn_model, X, A_hat, k, res=60, radius=None):
     return xx, yy, pred.reshape(xx.shape)
 
 
-def mlp_decision_regions(mlp_model, X, res=60):
+def mlp_decision_regions(mlp_model, X, res=60, geo=None):
     """Régions de décision d'un MLP (il classe chaque point de la grille directement)."""
     xx, yy, G = _grid(X, res)
     mlp_model.eval()
     with torch.no_grad():
-        out = mlp_model(torch.tensor(G)).numpy()
+        out = mlp_model(torch.tensor(_geo_augment(G, X, geo))).numpy()
     pred = out.argmax(1) if out.shape[1] > 1 else (out[:, 0] > 0).astype(int)
     return xx, yy, pred.reshape(xx.shape)
 
@@ -2223,6 +2235,39 @@ if is_graph:
             "clairsemées ; le rayon les fait refléter la densité locale."
         )
 
+    # ─── Features géométriques du voisinage (retour encadrant S12) ───
+    # La binarisation du graphe jette la longueur et la direction des arêtes ;
+    # cette option les redonne au réseau en features d'entrée (x, y, longueur
+    # moyenne d'arête normalisée, verticalité). Calculées sur les k plus proches
+    # voisins (k de la sidebar), quelle que soit la construction choisie au-dessus.
+    use_geo_feats, geo_info = False, None
+    X_in = X.astype(np.float32)
+    if not is_sbm:
+        use_geo_feats = st.checkbox(
+            "Features de voisinage : longueur moyenne d'arête + verticalité "
+            "(la géométrie que la binarisation du graphe jette)",
+            help=(
+                "Ajoute deux features d'entrée par point, calculées sur ses k plus "
+                "proches voisins : la **longueur moyenne des arêtes** (courte = zone "
+                "dense — un estimateur de densité locale) et la **verticalité** du "
+                "voisinage (+1 = voisins alignés verticalement, −1 = horizontalement). "
+                "L'info géométrique des arêtes entre alors par le canal des features — "
+                "celui que toutes nos études montrent comme le plus lisible. Le MLP de "
+                "comparaison les reçoit aussi (comparaison équitable)."
+            ),
+        )
+        if use_geo_feats:
+            _mlen, _vert = knn_edge_stats(X, X, k=knn_k)
+            _mu, _sd = float(_mlen.mean()), float(_mlen.std() + 1e-9)
+            X_in = np.hstack([X, ((_mlen - _mu) / _sd)[:, None],
+                              _vert[:, None]]).astype(np.float32)
+            geo_info = (knn_k, _mu, _sd)
+            per_c = "  ·  ".join(
+                f"classe {c} : longueur {_mlen[y == c].mean():.2f}, verticalité "
+                f"{_vert[y == c].mean():+.2f}" for c in range(n_classes_eff)
+            )
+            st.caption(f"Features géométriques mesurées — {per_c}.")
+
     graph_title = ("Graphe communautaire (SBM)" if is_sbm else
                    f"Graphe par rayon (r={radius_r:g}) — {len(edges)} arêtes" if use_radius
                    else f"Graphe k-NN (k={knn_k}) — {len(edges)} arêtes")
@@ -2239,7 +2284,7 @@ if is_graph:
             tr_idx, val_idx, te_idx = gcn_masks(n)
             m_tr = torch.tensor(np.isin(np.arange(n), tr_idx))
             m_val = torch.tensor(np.isin(np.arange(n), val_idx))
-            Xt = torch.tensor(X, dtype=torch.float32)
+            Xt = torch.tensor(X_in, dtype=torch.float32)
             yt = (torch.tensor(y, dtype=torch.long) if is_multiclass
                   else torch.tensor(y, dtype=torch.float32).view(-1, 1))
 
@@ -2276,6 +2321,7 @@ if is_graph:
                 acc_train=float((pred[tr_idx] == y[tr_idx]).mean()),
                 hist=hist, model=gcn, A_hat=A_hat, A_bin=A_bin, k=knn_k, agg=gcn_agg,
                 build=("sbm" if is_sbm else "radius" if use_radius else "knn"), r=radius_r,
+                Xin=X_in, geo=geo_info,
             )
 
         g = st.session_state.gcn
@@ -2326,7 +2372,8 @@ if is_graph:
                 "Plus les classes y sont séparées, plus la tête a un travail facile — c'est "
                 "ce que résume le **score de séparabilité** (silhouette, de -1 à 1)."
             )
-            st.pyplot(plot_gcn_latent(g["model"], g["X"], g["y"], g["A_hat"]))
+            st.pyplot(plot_gcn_latent(g["model"], g["X"], g["y"], g["A_hat"],
+                                      Xin=g.get("Xin")))
             plt.close("all")
 
     # ─── Attention : sur quels voisins le modèle se concentre (GAT) ───
@@ -2341,7 +2388,7 @@ if is_graph:
                 "explication complète du modèle (résultat connu : moyenner les poids "
                 "d'attention ne suffit pas à interpréter un GAT)."
             )
-            alpha = gcn_attention(g["model"], g["X"], g["A_hat"])
+            alpha = gcn_attention(g["model"], g.get("Xin", g["X"]), g["A_hat"])
             focus = st.slider("Nœud à inspecter", 0, len(g["y"]) - 1, 0, key="att_focus")
             ac1, ac2 = st.columns([3, 2])
             with ac1:
@@ -2387,11 +2434,13 @@ if is_graph:
             "graphe, lui, exploite la **structure** des communautés."
         )
         out_dim = n_classes_eff if is_multiclass else 1
+        g_Xin = g.get("Xin", g["X"])
         torch.manual_seed(int(weight_seed))
-        mlp_cmp = MLP(2, [neurons_per_layer, neurons_per_layer], out_dim, activation=activation)
+        mlp_cmp = MLP(g_Xin.shape[1], [neurons_per_layer, neurons_per_layer], out_dim,
+                      activation=activation)
         opt = torch.optim.Adam(mlp_cmp.parameters(), lr=learning_rate)
         crit = nn.CrossEntropyLoss() if is_multiclass else nn.BCEWithLogitsLoss()
-        Xtr = torch.tensor(g["X"][g["tr_idx"]], dtype=torch.float32)
+        Xtr = torch.tensor(g_Xin[g["tr_idx"]], dtype=torch.float32)
         ytr = (torch.tensor(g["y"][g["tr_idx"]], dtype=torch.long) if is_multiclass
                else torch.tensor(g["y"][g["tr_idx"]], dtype=torch.float32).view(-1, 1))
         torch.manual_seed(int(weight_seed))
@@ -2399,7 +2448,7 @@ if is_graph:
             mlp_cmp.train(); opt.zero_grad(); crit(mlp_cmp(Xtr), ytr).backward(); opt.step()
         mlp_cmp.eval()
         with torch.no_grad():
-            mout = mlp_cmp(torch.tensor(g["X"], dtype=torch.float32)).numpy()
+            mout = mlp_cmp(torch.tensor(g_Xin, dtype=torch.float32)).numpy()
         mpred = mout.argmax(1) if is_multiclass else (mout[:, 0] > 0).astype(int)
         acc_mlp = float((mpred[g["te_idx"]] == g["y"][g["te_idx"]]).mean())
 
@@ -2461,14 +2510,16 @@ if is_graph:
             with st.spinner("Calcul des régions…"):
                 reg_gcn = gcn_decision_regions(
                     g["model"], g["X"], g["A_hat"], g["k"],
-                    radius=(g["r"] if g.get("build") == "radius" else None))
+                    radius=(g["r"] if g.get("build") == "radius" else None),
+                    Xin=g.get("Xin"), geo=g.get("geo"))
                 out_dim = n_classes_eff if is_multiclass else 1
+                g_Xin = g.get("Xin", g["X"])
                 torch.manual_seed(int(weight_seed))
-                mlp_cmp = MLP(2, [neurons_per_layer, neurons_per_layer], out_dim,
-                              activation=activation)
+                mlp_cmp = MLP(g_Xin.shape[1], [neurons_per_layer, neurons_per_layer],
+                              out_dim, activation=activation)
                 opt = torch.optim.Adam(mlp_cmp.parameters(), lr=learning_rate)
                 crit = nn.CrossEntropyLoss() if is_multiclass else nn.BCEWithLogitsLoss()
-                Xtr = torch.tensor(g["X"][g["tr_idx"]], dtype=torch.float32)
+                Xtr = torch.tensor(g_Xin[g["tr_idx"]], dtype=torch.float32)
                 ytr = (torch.tensor(g["y"][g["tr_idx"]], dtype=torch.long) if is_multiclass
                        else torch.tensor(g["y"][g["tr_idx"]], dtype=torch.float32).view(-1, 1))
                 torch.manual_seed(int(weight_seed))
@@ -2477,10 +2528,10 @@ if is_graph:
                     opt.zero_grad()
                     crit(mlp_cmp(Xtr), ytr).backward()
                     opt.step()
-                reg_mlp = mlp_decision_regions(mlp_cmp, g["X"])
+                reg_mlp = mlp_decision_regions(mlp_cmp, g["X"], geo=g.get("geo"))
                 mlp_cmp.eval()
                 with torch.no_grad():
-                    mout = mlp_cmp(torch.tensor(g["X"], dtype=torch.float32)).numpy()
+                    mout = mlp_cmp(torch.tensor(g_Xin, dtype=torch.float32)).numpy()
                 mpred = mout.argmax(1) if is_multiclass else (mout[:, 0] > 0).astype(int)
                 acc_mlp = float((mpred[g["te_idx"]] == g["y"][g["te_idx"]]).mean())
             st.pyplot(plot_regions_compare(g["X"], g["y"], reg_gcn, reg_mlp,

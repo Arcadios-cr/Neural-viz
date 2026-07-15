@@ -69,6 +69,35 @@ def knn_edges(A_bin: np.ndarray):
     return list(zip(iu.tolist(), ju.tolist()))
 
 
+def knn_edge_stats(P: np.ndarray, X_ref: np.ndarray, k: int = 6):
+    """
+    Statistiques GÉOMÉTRIQUES du voisinage k-NN (retour encadrant S12) : la
+    binarisation du graphe jette la longueur et la direction des arêtes ; on
+    les récupère ici sous forme de deux features par point :
+
+      - longueur moyenne des k arêtes (~ 1/densité locale : courte = zone dense) ;
+      - verticalité du voisinage, (|dy| - |dx|) / (|dy| + |dx|) moyenné sur les
+        k voisins, dans [-1, 1] : +1 = voisins alignés verticalement (colonne),
+        -1 = horizontalement (ligne), ~0 = isotrope.
+
+    ``P`` : points où évaluer (n, 2) ; ``X_ref`` : nuage de référence pour les
+    voisins. Si P est X_ref lui-même, le point est exclu de ses propres voisins.
+    Renvoie (mean_len, verticality), deux arrays (n,). Brutes (non normalisées).
+    """
+    from sklearn.neighbors import NearestNeighbors
+    same = P is X_ref or (P.shape == X_ref.shape and np.array_equal(P, X_ref))
+    nn = NearestNeighbors(n_neighbors=k + 1 if same else k).fit(X_ref)
+    dist, idx = nn.kneighbors(P)
+    if same:                                   # retire le point lui-même (distance 0)
+        dist, idx = dist[:, 1:], idx[:, 1:]
+    d = X_ref[idx] - P[:, None, :]             # (n, k, 2) : offsets vers les voisins
+    mean_len = dist.mean(axis=1)
+    adx = np.abs(d[:, :, 0]).mean(axis=1)
+    ady = np.abs(d[:, :, 1]).mean(axis=1)
+    verticality = (ady - adx) / (ady + adx + 1e-9)
+    return mean_len, verticality
+
+
 def normalize_adj(A_bin: np.ndarray) -> torch.Tensor:
     """
     Normalisation de Kipf : Â = D^{-1/2} (A + I) D^{-1/2}, à partir d'une
