@@ -21,9 +21,15 @@ k = 6, Adam lr 0.01, 100 époques, transductif 60/20/20, 3 seeds d'init) :
   - GCN agrégation max (GraphSAGE) sur k-NN (sensible à l'étalement directionnel) ;
   - GCN agrégation SOMME (GIN) sur graphe par RAYON, BatchNorm forcée : la seule
     agrégation qui « compte » les voisins, donc qui peut lire le degré ;
+  - MLP + features d'ARÊTE (longueur moyenne des k arêtes + verticalité du
+    voisinage, cf. data.graphs.knn_edge_stats) : la recette GÉNÉRIQUE proposée
+    par l'encadrant — les deux mêmes features partout, sans choisir selon le
+    scénario ; la géométrie que la binarisation du graphe jette, consommée
+    directement en entrée ;
   - MLP + « info voisinage » en 3e feature (degré du graphe rayon pour la
     densité, anisotropie |dy|-|dx| des voisins k-NN pour la structure) :
-    borne de ce que le voisinage PEUT apporter si on sait le lire.
+    borne « oracle » de ce que le voisinage PEUT apporter si on sait le lire
+    ET qu'on sait laquelle donner.
 
 Loi (fil des semaines 9-12) : le voisinage n'aide que si (a) il porte une info
 ABSENTE des features (position) et (b) l'architecture sait la LIRE — l'agrégation
@@ -56,7 +62,7 @@ import torch
 import torch.nn as nn
 
 from data.datasets import get_dataset
-from data.graphs import build_knn, build_radius
+from data.graphs import build_knn, build_radius, knn_edge_stats
 from models.gcn import GCN
 from models.mlp import MLP
 
@@ -73,6 +79,7 @@ PALETTE = {
     "GCN mean (rayon)":     "#FF9800",
     "GCN max (k-NN)":       "#FF5722",
     "GCN somme (rayon)":    "#E91E63",
+    "MLP + feat. d'arête":  "#6A1B9A",
     "MLP + info voisinage": "#607D8B",
 }
 
@@ -122,6 +129,10 @@ def run_scenario(X, y, r, feature_kind):
     A_rad, Ab_rad = build_radius(X, r=r)
     feat = neighborhood_feature(X, feature_kind, Ab_rad)
     X_feat = np.hstack([X, feat[:, None]]).astype(np.float32)
+    # Route 3 : la géométrie des arêtes k-NN en features (longueur + verticalité)
+    mlen, vert = knn_edge_stats(X, X, k=K)
+    mlen_n = (mlen - mlen.mean()) / (mlen.std() + 1e-9)
+    X_edge = np.hstack([X, mlen_n[:, None], vert[:, None]]).astype(np.float32)
 
     def gcn(Ah, agg, ws, bn=False):
         Xt = torch.tensor(X, dtype=torch.float32)
@@ -159,6 +170,7 @@ def run_scenario(X, y, r, feature_kind):
         # Somme (GIN) : la seule agrégation qui « compte » les voisins — BN forcée
         # (sans elle : instable, ±9 pts entre seeds ; cf. l'article GIN).
         "GCN somme (rayon)":    lambda ws: gcn(A_rad, "sum", ws, bn=True),
+        "MLP + feat. d'arête":  lambda ws: mlp(X_edge, ws),
         "MLP + info voisinage": lambda ws: mlp(X_feat, ws),
     }
     out = {}
@@ -193,7 +205,7 @@ def main():
     # ─── Figure : barres groupées par scénario ───
     names = list(PALETTE)
     n_models = len(names)
-    width = 0.15
+    width = 0.12
     fig, ax = plt.subplots(figsize=(13, 5.5))
     xs = np.arange(len(results))
     for j, name in enumerate(names):
