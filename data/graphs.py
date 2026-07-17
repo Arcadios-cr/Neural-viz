@@ -71,7 +71,7 @@ def knn_edges(A_bin: np.ndarray):
 
 def knn_edge_stats(P: np.ndarray, X_ref: np.ndarray, k: int = 6):
     """
-    Statistiques GÉOMÉTRIQUES du voisinage k-NN (retour encadrant S12) : la
+    Statistiques GÉOMÉTRIQUES du voisinage k-NN : la
     binarisation du graphe jette la longueur et la direction des arêtes ; on
     les récupère ici sous forme de deux features par point :
 

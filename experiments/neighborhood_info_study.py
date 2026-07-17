@@ -1,7 +1,5 @@
 """
-Synthèse S11 — quand l'information du VOISINAGE aide-t-elle ? (retour encadrant :
-« chevauchement + densité / structure, pour que le réseau de graphe devienne
-intéressant »).
+Synthèse S11 — quand l'information du VOISINAGE aide-t-elle ?
 
 Trois scénarios de chevauchement, où l'indice discriminant local diffère :
 
@@ -31,7 +29,7 @@ k = 6, Adam lr 0.01, 100 époques, transductif 60/20/20, 3 seeds d'init) :
     borne « oracle » de ce que le voisinage PEUT apporter si on sait le lire
     ET qu'on sait laquelle donner.
 
-Loi (fil des semaines 9-12) : le voisinage n'aide que si (a) il porte une info
+Loi : le voisinage n'aide que si (a) il porte une info
 ABSENTE des features (position) et (b) l'architecture sait la LIRE — l'agrégation
 moyenne normalisée (Kipf) gomme le degré, et la moyenne compense les décalages
 symétriques (arrangement). La barre « MLP + feature » (la borne) domine dès que

@@ -1,15 +1,15 @@
 """
-Stochastic Block Model (SBM) : un dataset où c'est le GRAPHE qui porte
+Stochastic Block Model (SBM) : un dataset où c'est le graphe qui porte
 l'information, pas les coordonnées.
 
 Motivation. Sur nos datasets habituels, le graphe est construit à partir des
 coordonnées (k-NN) → il ne peut rien dire de plus que les features, donc le
-réseau de graphe ≈ MLP. Pour voir un GNN VRAIMENT gagner, il faut le cas
+réseau de graphe ≈ MLP. Pour voir un GNN vraiment gagner, il faut le cas
 « features faibles + structure forte » de la littérature :
 
-  - le graphe est FOURNI par un SBM : beaucoup d'arêtes À L'INTÉRIEUR d'une
-    communauté (= une classe), peu ENTRE communautés (graphe homophile) ;
-  - les features 2D sont VOLONTAIREMENT faibles (communautés très chevauchantes)
+  - le graphe est fourni par un SBM : avec beaucoup d'arêtes à l'intérieur d'une
+    communauté (= une classe), peu entre communautés (graphe homophile) ;
+  - les features 2D sont donc volontairement faibles (communautés très chevauchantes)
     → un MLP qui ne voit que les features est presque au niveau du hasard.
 
 Le réseau de graphe exploite la structure (les communautés) → il classe ;

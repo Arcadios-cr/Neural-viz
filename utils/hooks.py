@@ -3,11 +3,8 @@ Module de capture des activations intermédiaires d'un réseau de neurones
 via les forward hooks PyTorch.
 
 Les forward hooks sont des fonctions attachées à un module PyTorch qui sont
-appelées automatiquement à chaque forward pass. Elles permettent de "voler"
-la sortie d'une couche sans modifier l'architecture du réseau.
+appelées automatiquement à chaque forward pass. 
 
-Ce module est l'amorce de la visualisation des activations couche par couche
-qui sera implémentée la semaine 4.
 """
 
 import torch

@@ -4,9 +4,7 @@ Scripts d'**étude de la généralisation** par balayage d'hyperparamètres.
 
 Contrairement à l'app Streamlit (qui entraîne **un** modèle à la fois, de façon
 interactive), ces scripts lancent **plusieurs** entraînements en faisant varier
-un paramètre, puis tracent la courbe correspondante. C'est la façon standard de
-mener une étude d'hyperparamètres (on automatise le balayage au lieu de cliquer
-plusieurs fois).
+un paramètre, puis tracent la courbe correspondante.
 
 Chaque script :
 - **fixe les graines aléatoires** (résultats reproductibles d'une exécution à l'autre) ;
