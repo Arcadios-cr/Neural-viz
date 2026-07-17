@@ -51,6 +51,18 @@ Les études reproductibles se lancent depuis la racine du projet, par exemple :
 python experiments/neighborhood_info_study.py   # figures dans experiments/figures/
 ```
 
+## Vérifier que tout marche — tests de non-régression
+
+```bash
+python tests/smoke_test.py
+```
+
+Le script traverse l'application de bout en bout **sans navigateur** (via
+`streamlit.testing.v1.AppTest`) : chargement des 16 datasets, entraînement MLP
+(binaire et multi-classes), réseau de graphe pour chaque agrégation et chaque
+construction de graphe, features géométriques, SBM et étude intégrée.
+Une ligne par vérification, code de retour 0 si tout est vert (~2 minutes).
+
 ## Structure du dépôt — qui fait quoi
 
 ### Racine
@@ -89,6 +101,12 @@ python experiments/neighborhood_info_study.py   # figures dans experiments/figur
 | Fichier | Rôle |
 |---|---|
 | `hooks.py` | Forward hooks PyTorch : capture des activations couche par couche pour la visualisation. |
+
+### `tests/`
+
+| Fichier | Rôle |
+|---|---|
+| `smoke_test.py` | Tests de non-régression de bout en bout (AppTest, sans navigateur) : les deux modes, toutes les agrégations et constructions de graphe, features géométriques, multi-classes, SBM. |
 
 ### `experiments/` — études reproductibles (détail dans `experiments/README.md`)
 
