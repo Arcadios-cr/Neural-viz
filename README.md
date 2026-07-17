@@ -59,7 +59,6 @@ python experiments/neighborhood_info_study.py   # figures dans experiments/figur
 |---|---|
 | `app.py` | L'application Streamlit complète : sidebar de configuration, mode MLP (frontière de décision, activations, poids/gradients, espace latent, généralisation) et mode réseau de graphe (construction du graphe, entraînement transductif, comparaisons MLP vs graphe, études intégrées). Toutes les figures interactives y sont produites. |
 | `requirements.txt` | Dépendances Python (PyTorch, Streamlit, Matplotlib, Plotly, NumPy, scikit-learn). |
-| `context.md` | Contexte et planning initial du TER. |
 | `README.md` | Ce fichier. |
 
 ### `models/` — les réseaux
